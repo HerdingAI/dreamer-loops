@@ -1,0 +1,45 @@
+# --- your data -----------------------------------------------------------
+#
+# NOTE: vault/ is deliberately NOT ignored. The jobs commit it on every run —
+# that git history IS the audit trail, and it is what lets you ask "what
+# changed last night?" and get a real answer. Ignoring it would break the
+# system's core guarantee, not just its convenience.
+#
+# The consequence: once you start using this, YOUR CLONE CONTAINS YOUR PRIVATE
+# NOTES. Two safe ways to live with that:
+#
+#   1. Keep your clone private. Never push it to a public fork.
+#   2. Better: point `paths.vault` in config.yaml at a directory outside this
+#      repo, with its own private git repo. Absolute paths are honoured, so
+#      the code and your notes then never share a history at all.
+#
+# The empty vault/ skeleton with .gitkeep files is what ships publicly.
+
+# Raw exports waiting to be ingested, and the extracted reference corpus.
+to_ingest/
+wisdom_md/
+
+# Job logs contain excerpts of your own material.
+logs/
+*.log
+
+# Your real config: local paths, your tuning.
+config.yaml
+
+# Local MCP wiring, generated from the .example files.
+.mcp.json
+.qmd/
+
+# --- derived -------------------------------------------------------------
+# Regenerated on every job commit and carries a generation timestamp, so
+# committing it would put a diff in every single run whether or not the vault
+# actually changed. Rebuild any time with ./bin/dashboard.sh
+vault/dashboard.html
+
+# --- editor / runtime ----------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.DS_Store
+.claude/settings.local.json

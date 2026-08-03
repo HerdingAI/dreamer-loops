@@ -1,0 +1,132 @@
+# Dreamer — system constants.
+#
+# Copy to `config.yaml` and edit. `config.yaml` is gitignored, so your real
+# paths and tuning never end up in a commit.
+#
+# Every constant the constitution (CLAUDE.md) names must exist here. The
+# constitution is forbidden from hardcoding a value this file defines — that
+# is what keeps the rules readable and the numbers tunable.
+
+paths:
+  # Relative paths resolve against the repo root, so a fresh clone just works.
+  # Absolute paths are honoured unchanged — use one for `vault` if you want
+  # your notes in a separate private repo or on a different disk.
+  root:            .
+  vault:           vault
+  inbox:           vault/inbox
+  resurfacings:    vault/inbox/resurfacings
+  sources:         vault/sources/transcripts
+  loops:           vault/loops
+  conclusions:     vault/conclusions
+  concepts:        vault/concepts
+  archive:         vault/archive
+  digests:         vault/digests
+  meta:            vault/.vault-meta
+  logs:            logs
+
+# Where your raw material lives. Both are optional:
+#   - without `claude_export`, ingest transcripts yourself into vault/inbox
+#   - without `wisdom_sources`, the `wisdom` research route has nothing to
+#     read and loops routed there escalate to web (constitution rule 5a)
+corpora:
+  # Unpacked claude.ai data export, or any directory of conversations.json.
+  claude_export:   /path/to/claude-export
+  # Directories of books, papers, lecture transcripts — your reference
+  # library. Any mix of .txt / .md / .pdf / .epub; see bin/verify.sh.
+  wisdom_sources:
+    - /path/to/your/library
+  # Where extracted plain text is written for indexing. Gitignored.
+  wisdom_build:    wisdom_md
+
+# --- state machine --------------------------------------------------------
+decay:
+  # Null until you are ready for loops to start ageing out. Decay is inert
+  # while this is null, which is the correct setting for a first run and for
+  # the whole of any backfill.
+  #
+  # Decay is measured against max(last_seen, go_live_date), never last_seen
+  # alone — otherwise a backfilled loop whose last occurrence is months old
+  # would archive on day one and destroy the value of the backfill.
+  go_live_date:    null
+  decay_weeks:     8
+  # paused / decision-only loops decay at this multiple of decay_weeks
+  terminal_multiplier: 2
+
+# --- matching -------------------------------------------------------------
+matching:
+  # How many distinct conversations a loop needs before it is eligible for
+  # research. Do NOT guess this: run `python3 scripts/calibrate.py all` and
+  # read the recurrence histogram off your own corpus. Too low and the weekly
+  # run drowns in one-offs; too high and it starves.
+  recurrence_min:  2
+  # How many catalog candidates Stage A considers before opening any page.
+  stage_a_top_k:   5
+  # Recency-weighted recurrence: weight = 0.5 ** (age_days / half_life_days)
+  recency_half_life_days: 60
+  # An unconfirmed merge proposal is re-proposed once, then cools down for
+  # this long rather than nagging forever.
+  merge_proposal_expiry_weeks: 4
+  # Paid judge calls per merge refresh. Each pair is judged once and the
+  # verdict is cached, so this caps how fast the backlog drains — not how much
+  # work is re-bought every run.
+  max_judged_per_run: 40
+  precision_floor: 0.70
+  precision_window: 30
+
+# --- extraction -----------------------------------------------------------
+extraction:
+  # Transcripts per LLM call. Smaller = more resumable, more overhead.
+  batch_size:      15
+  # Size of the pilot slice used for calibration before a full backfill.
+  slice_size:      100
+
+# --- budget ---------------------------------------------------------------
+budget:
+  max_turns_nightly:  60
+  max_turns_weekly:   150
+  max_turns_backfill: 80
+  # Model for headless job runs. The jobs are high-volume and structured, so
+  # a cheaper model per call means more calls before any usage window closes.
+  model: sonnet
+
+  # Post-run cost gate. `null` = unlimited (the default).
+  #
+  # Cost is recorded and reported every run regardless; only the gate is off.
+  # Under a subscription the reported figure is API-equivalent notional
+  # pricing, not money spent, and the real limit is the rolling usage window —
+  # which the job harness already handles by treating a non-zero exit as a
+  # clean, resumable deferral. Set a float to restore the gate; that becomes
+  # meaningful if you run the jobs against a paid API key.
+  cost_ceiling_per_run: null
+
+freshness:
+  # Warn in the digest when no new transcript has arrived in this long.
+  stale_inbox_days: 10
+
+# --- research -------------------------------------------------------------
+research:
+  # Loops researched per weekly run.
+  weekly_loop_count: 3
+  # Hard cap on outbound fetches per loop (constitution rule 12).
+  max_fetches_per_loop: 45
+  # A concluded loop that resurfaces is SERVED its existing conclusion, not
+  # re-researched, unless something is genuinely new (rule 14). This is a hard
+  # cooldown regardless of what the selection judge decides — without it, one
+  # loop can generate a chain of superseding conclusions in a couple of days.
+  min_days_between_reresearch: 21
+  # Only externally-factual (web/mixed) conclusions rot on age alone;
+  # principle-level ones do not.
+  web_conclusion_stale_days: 90
+
+# --- MCP ------------------------------------------------------------------
+mcp:
+  transport: stdio              # no TCP listener, so no token to manage
+  note_max_chars: 500
+  max_resurfacings_per_run: 50
+
+# --- pinned versions ------------------------------------------------------
+pins:
+  qmd_version:     "2.5.3"
+  # skills/autoresearch is vendored from this commit. See its ATTRIBUTION.md.
+  claude_obsidian_commit: "1c1bc49c03a685ee8f5d09c99efe52b42d6673f5"
+  claude_obsidian_scope: "skills/autoresearch only (vendored, MIT)"

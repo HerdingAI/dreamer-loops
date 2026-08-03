@@ -1,0 +1,401 @@
+[
+ {
+  "uuid": "fixture-memory-arch",
+  "name": "Memory Arch",
+  "created_at": "2026-08-02T10:00:00.000000Z",
+  "updated_at": "2026-08-02T11:00:00.000000Z",
+  "account": {
+   "uuid": "fixture"
+  },
+  "chat_messages": [
+   {
+    "uuid": "memory-arch-0",
+    "sender": "human",
+    "text": "I keep coming back to how agent memory should persist across sessions. File or DB?",
+    "content": [
+     {
+      "type": "text",
+      "text": "I keep coming back to how agent memory should persist across sessions. File or DB?"
+     }
+    ],
+    "attachments": [],
+    "files": [],
+    "created_at": "2026-08-02T10:00:00.000000Z",
+    "updated_at": "2026-08-02T10:00:00.000000Z"
+   },
+   {
+    "uuid": "memory-arch-1",
+    "sender": "assistant",
+    "text": "Both are viable. It depends on legibility requirements.",
+    "content": [
+     {
+      "type": "text",
+      "text": "Both are viable. It depends on legibility requirements."
+     }
+    ],
+    "attachments": [],
+    "files": [],
+    "created_at": "2026-08-02T10:01:00.000000Z",
+    "updated_at": "2026-08-02T10:01:00.000000Z"
+   },
+   {
+    "uuid": "memory-arch-2",
+    "sender": "human",
+    "text": "I still don't know whether this should be a file or a DB. Leaving it for now.",
+    "content": [
+     {
+      "type": "text",
+      "text": "I still don't know whether this should be a file or a DB. Leaving it for now."
+     }
+    ],
+    "attachments": [],
+    "files": [],
+    "created_at": "2026-08-02T10:02:00.000000Z",
+    "updated_at": "2026-08-02T10:02:00.000000Z"
+   }
+  ]
+ },
+ {
+  "uuid": "fixture-quick-fix",
+  "name": "Quick Fix",
+  "created_at": "2026-08-03T10:00:00.000000Z",
+  "updated_at": "2026-08-03T11:00:00.000000Z",
+  "account": {
+   "uuid": "fixture"
+  },
+  "chat_messages": [
+   {
+    "uuid": "quick-fix-0",
+    "sender": "human",
+    "text": "What's the flag to make flock non-blocking?",
+    "content": [
+     {
+      "type": "text",
+      "text": "What's the flag to make flock non-blocking?"
+     }
+    ],
+    "attachments": [],
+    "files": [],
+    "created_at": "2026-08-03T10:00:00.000000Z",
+    "updated_at": "2026-08-03T10:00:00.000000Z"
+   },
+   {
+    "uuid": "quick-fix-1",
+    "sender": "assistant",
+    "text": "Use -n.",
+    "content": [
+     {
+      "type": "text",
+      "text": "Use -n."
+     }
+    ],
+    "attachments": [],
+    "files": [],
+    "created_at": "2026-08-03T10:01:00.000000Z",
+    "updated_at": "2026-08-03T10:01:00.000000Z"
+   },
+   {
+    "uuid": "quick-fix-2",
+    "sender": "human",
+    "text": "Perfect, that works. Done.",
+    "content": [
+     {
+      "type": "text",
+      "text": "Perfect, that works. Done."
+     }
+    ],
+    "attachments": [],
+    "files": [],
+    "created_at": "2026-08-03T10:02:00.000000Z",
+    "updated_at": "2026-08-03T10:02:00.000000Z"
+   }
+  ]
+ },
+ {
+  "uuid": "fixture-router-design",
+  "name": "Router Design",
+  "created_at": "2026-08-04T10:00:00.000000Z",
+  "updated_at": "2026-08-04T11:00:00.000000Z",
+  "account": {
+   "uuid": "fixture"
+  },
+  "chat_messages": [
+   {
+    "uuid": "router-design-0",
+    "sender": "human",
+    "text": "Should routing be intent-based or keyword-based? I go back and forth.",
+    "content": [
+     {
+      "type": "text",
+      "text": "Should routing be intent-based or keyword-based? I go back and forth."
+     }
+    ],
+    "attachments": [],
+    "files": [],
+    "created_at": "2026-08-04T10:00:00.000000Z",
+    "updated_at": "2026-08-04T10:00:00.000000Z"
+   },
+   {
+    "uuid": "router-design-1",
+    "sender": "assistant",
+    "text": "Intent-based generalises better but costs a model call.",
+    "content": [
+     {
+      "type": "text",
+      "text": "Intent-based generalises better but costs a model call."
+     }
+    ],
+    "attachments": [],
+    "files": [],
+    "created_at": "2026-08-04T10:01:00.000000Z",
+    "updated_at": "2026-08-04T10:01:00.000000Z"
+   }
+  ]
+ },
+ {
+  "uuid": "fixture-memory-arch-again",
+  "name": "Memory Arch Again",
+  "created_at": "2026-08-05T10:00:00.000000Z",
+  "updated_at": "2026-08-05T11:00:00.000000Z",
+  "account": {
+   "uuid": "fixture"
+  },
+  "chat_messages": [
+   {
+    "uuid": "memory-arch-again-0",
+    "sender": "human",
+    "text": "Back on storage: if memory is a file, how do I avoid it rotting?",
+    "content": [
+     {
+      "type": "text",
+      "text": "Back on storage: if memory is a file, how do I avoid it rotting?"
+     }
+    ],
+    "attachments": [],
+    "files": [],
+    "created_at": "2026-08-05T10:00:00.000000Z",
+    "updated_at": "2026-08-05T10:00:00.000000Z"
+   },
+   {
+    "uuid": "memory-arch-again-1",
+    "sender": "assistant",
+    "text": "Regenerate derived indexes rather than maintaining them.",
+    "content": [
+     {
+      "type": "text",
+      "text": "Regenerate derived indexes rather than maintaining them."
+     }
+    ],
+    "attachments": [],
+    "files": [],
+    "created_at": "2026-08-05T10:01:00.000000Z",
+    "updated_at": "2026-08-05T10:01:00.000000Z"
+   }
+  ]
+ },
+ {
+  "uuid": "fixture-cost-model",
+  "name": "Cost Model",
+  "created_at": "2026-08-06T10:00:00.000000Z",
+  "updated_at": "2026-08-06T11:00:00.000000Z",
+  "account": {
+   "uuid": "fixture"
+  },
+  "chat_messages": [
+   {
+    "uuid": "cost-model-0",
+    "sender": "human",
+    "text": "Subscription or API keys for the scheduled jobs? Still unsure.",
+    "content": [
+     {
+      "type": "text",
+      "text": "Subscription or API keys for the scheduled jobs? Still unsure."
+     }
+    ],
+    "attachments": [],
+    "files": [],
+    "created_at": "2026-08-06T10:00:00.000000Z",
+    "updated_at": "2026-08-06T10:00:00.000000Z"
+   },
+   {
+    "uuid": "cost-model-1",
+    "sender": "assistant",
+    "text": "Subscription shares your interactive window; keys don't.",
+    "content": [
+     {
+      "type": "text",
+      "text": "Subscription shares your interactive window; keys don't."
+     }
+    ],
+    "attachments": [],
+    "files": [],
+    "created_at": "2026-08-06T10:01:00.000000Z",
+    "updated_at": "2026-08-06T10:01:00.000000Z"
+   }
+  ]
+ },
+ {
+  "uuid": "fixture-memory-arch-third",
+  "name": "Memory Arch Third",
+  "created_at": "2026-08-07T10:00:00.000000Z",
+  "updated_at": "2026-08-07T11:00:00.000000Z",
+  "account": {
+   "uuid": "fixture"
+  },
+  "chat_messages": [
+   {
+    "uuid": "memory-arch-third-0",
+    "sender": "human",
+    "text": "Third time on this: persistence for agent memory. I want it hand-editable.",
+    "content": [
+     {
+      "type": "text",
+      "text": "Third time on this: persistence for agent memory. I want it hand-editable."
+     }
+    ],
+    "attachments": [],
+    "files": [],
+    "created_at": "2026-08-07T10:00:00.000000Z",
+    "updated_at": "2026-08-07T10:00:00.000000Z"
+   },
+   {
+    "uuid": "memory-arch-third-1",
+    "sender": "assistant",
+    "text": "That points at Markdown.",
+    "content": [
+     {
+      "type": "text",
+      "text": "That points at Markdown."
+     }
+    ],
+    "attachments": [],
+    "files": [],
+    "created_at": "2026-08-07T10:01:00.000000Z",
+    "updated_at": "2026-08-07T10:01:00.000000Z"
+   }
+  ]
+ },
+ {
+  "uuid": "fixture-router-variant",
+  "name": "Router Variant",
+  "created_at": "2026-08-08T10:00:00.000000Z",
+  "updated_at": "2026-08-08T11:00:00.000000Z",
+  "account": {
+   "uuid": "fixture"
+  },
+  "chat_messages": [
+   {
+    "uuid": "router-variant-0",
+    "sender": "human",
+    "text": "Does the router classify before or after retrieval? Might be the same question as before.",
+    "content": [
+     {
+      "type": "text",
+      "text": "Does the router classify before or after retrieval? Might be the same question as before."
+     }
+    ],
+    "attachments": [],
+    "files": [],
+    "created_at": "2026-08-08T10:00:00.000000Z",
+    "updated_at": "2026-08-08T10:00:00.000000Z"
+   },
+   {
+    "uuid": "router-variant-1",
+    "sender": "assistant",
+    "text": "Classifying first avoids wasted retrieval.",
+    "content": [
+     {
+      "type": "text",
+      "text": "Classifying first avoids wasted retrieval."
+     }
+    ],
+    "attachments": [],
+    "files": [],
+    "created_at": "2026-08-08T10:01:00.000000Z",
+    "updated_at": "2026-08-08T10:01:00.000000Z"
+   }
+  ]
+ },
+ {
+  "uuid": "fixture-cost-model-again",
+  "name": "Cost Model Again",
+  "created_at": "2026-08-09T10:00:00.000000Z",
+  "updated_at": "2026-08-09T11:00:00.000000Z",
+  "account": {
+   "uuid": "fixture"
+  },
+  "chat_messages": [
+   {
+    "uuid": "cost-model-again-0",
+    "sender": "human",
+    "text": "The billing thing again \u2014 usage windows are what actually bite.",
+    "content": [
+     {
+      "type": "text",
+      "text": "The billing thing again \u2014 usage windows are what actually bite."
+     }
+    ],
+    "attachments": [],
+    "files": [],
+    "created_at": "2026-08-09T10:00:00.000000Z",
+    "updated_at": "2026-08-09T10:00:00.000000Z"
+   },
+   {
+    "uuid": "cost-model-again-1",
+    "sender": "assistant",
+    "text": "Off-peak scheduling helps but doesn't eliminate it.",
+    "content": [
+     {
+      "type": "text",
+      "text": "Off-peak scheduling helps but doesn't eliminate it."
+     }
+    ],
+    "attachments": [],
+    "files": [],
+    "created_at": "2026-08-09T10:01:00.000000Z",
+    "updated_at": "2026-08-09T10:01:00.000000Z"
+   }
+  ]
+ },
+ {
+  "uuid": "fixture-memory-arch-fourth",
+  "name": "Memory Arch Fourth",
+  "created_at": "2026-08-10T10:00:00.000000Z",
+  "updated_at": "2026-08-10T11:00:00.000000Z",
+  "account": {
+   "uuid": "fixture"
+  },
+  "chat_messages": [
+   {
+    "uuid": "memory-arch-fourth-0",
+    "sender": "human",
+    "text": "Revisiting memory persistence once more, now that I've seen it in practice.",
+    "content": [
+     {
+      "type": "text",
+      "text": "Revisiting memory persistence once more, now that I've seen it in practice."
+     }
+    ],
+    "attachments": [],
+    "files": [],
+    "created_at": "2026-08-10T10:00:00.000000Z",
+    "updated_at": "2026-08-10T10:00:00.000000Z"
+   },
+   {
+    "uuid": "memory-arch-fourth-1",
+    "sender": "assistant",
+    "text": "The conclusion you reached still holds, with one caveat.",
+    "content": [
+     {
+      "type": "text",
+      "text": "The conclusion you reached still holds, with one caveat."
+     }
+    ],
+    "attachments": [],
+    "files": [],
+    "created_at": "2026-08-10T10:01:00.000000Z",
+    "updated_at": "2026-08-10T10:01:00.000000Z"
+   }
+  ]
+ }
+]
