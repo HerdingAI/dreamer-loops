@@ -1,0 +1,16 @@
+# qmd collections. Paths are relative to this repo root.
+#
+# NOTE: `conclusions` is a DELIBERATELY separate collection, excluded from the
+# research-facing `vault` collection (which maps vault/loops only). Research
+# routes query wisdom / vault / transcripts; keeping Dreamer's own written
+# conclusions out of those is what stops its prior output coming back as
+# evidence for itself (constitution rule 13). Do not merge these paths.
+collections:
+  wisdom:
+    path: wisdom_md
+  vault:
+    path: vault/loops
+  transcripts:
+    path: vault/sources/transcripts
+  conclusions:
+    path: vault/conclusions

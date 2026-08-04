@@ -182,8 +182,12 @@ code. If you want to *change* its behaviour, change `CLAUDE.md` first.
   canonical statement. Verbatim transcript text, personal identifiers, and
   third-party names are never sent. Every query and fetched URL is logged and
   appears in the digest.
-- `vault/` is gitignored here. If you want your notes versioned — recommended —
-  give them a **separate private repo**.
+- **`vault/` is deliberately *not* gitignored** — the jobs commit it on every
+  run, and that history is the audit trail. The consequence is that a working
+  clone contains your private notes. So: keep your clone private, or better,
+  point `paths.vault` at a directory **outside this repo with its own private
+  git repo**. Absolute paths are honoured, so your code and your notes then
+  never share a history at all. Only the empty `vault/` skeleton ships here.
 
 ---
 

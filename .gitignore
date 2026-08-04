@@ -28,7 +28,13 @@ config.yaml
 
 # Local MCP wiring, generated from the .example files.
 .mcp.json
-.qmd/
+
+# qmd's local index and generated config. The directory is ignored by its
+# contents rather than by name, so the negation below can still take effect —
+# `.qmd/` alone would stop git descending into it and `setup.sh` would find no
+# template to copy in a fresh clone.
+.qmd/*
+!.qmd/index.yml.example
 
 # --- derived -------------------------------------------------------------
 # Regenerated on every job commit and carries a generation timestamp, so
