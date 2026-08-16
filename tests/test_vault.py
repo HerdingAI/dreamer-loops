@@ -226,8 +226,10 @@ class CatalogTest(VaultCase):
         V.create_loop("Beta", self.transcript("2026-07-02", "b"), D("2026-07-02"))
         path = V.regenerate_catalog()
         text = path.read_text(encoding="utf-8")
-        self.assertIn("| L0001 | Alpha | open | 1 |", text)
-        self.assertIn("| L0002 | Beta | open | 1 |", text)
+        self.assertIn("| id | title | status | first_seen | count | last_seen |",
+                      text)
+        self.assertIn("| L0001 | Alpha | open | 2026-07-01 | 1 |", text)
+        self.assertIn("| L0002 | Beta | open | 2026-07-02 | 1 |", text)
 
     def test_regeneration_is_idempotent(self) -> None:
         V.create_loop("Alpha", self.transcript("2026-07-01", "a"), D("2026-07-01"))
@@ -254,7 +256,7 @@ class CatalogTest(VaultCase):
         self.assertIn(r"A \| B", row, "pipe in title must be escaped")
         # Count only unescaped delimiters — the escaped one is not a column break.
         delimiters = len(re.findall(r"(?<!\\)\|", row))
-        self.assertEqual(delimiters, 6, "escaped pipe must not add a column")
+        self.assertEqual(delimiters, 7, "escaped pipe must not add a column")
 
 
 class SelectionTest(VaultCase):
@@ -309,6 +311,130 @@ class MergeTest(VaultCase):
                          "a redirect is a signpost, not a loop — counting it "
                          "would resurrect the duplicate the merge removed")
 
+        # Idempotency of the union: the shared occurrence must appear ONCE and
+        # the count must equal the distinct-conversation count of the union.
+        self.assertEqual(len(merged.occurrences), len(set(merged.occurrences)),
+                         "shared occurrence duplicated by the merge")
+        self.assertEqual(merged.recurrence_count,
+                         merged.distinct_conversations())
+
+    def test_merge_sorts_union_chronologically(self) -> None:
+        """add_occurrence sorts; merge_loops used to blind-append, so a retire
+        loop older than the keep loop left the history unreadable."""
+        keep = V.create_loop("Keep", self.transcript("2026-06-01", "k1"),
+                             D("2026-06-01"))
+        retire = V.create_loop("Retire", self.transcript("2025-03-01", "r1"),
+                               D("2025-03-01"))
+        V.add_occurrence(retire, self.transcript("2025-08-01", "r2"),
+                         D("2025-08-01"))
+        merged = V.merge_loops(keep, retire)
+        dates = [d.isoformat() for d in merged.occurrence_dates()]
+        self.assertEqual(dates, sorted(dates), merged.occurrences)
+        # And the ordering must survive the round-trip to disk.
+        reloaded = V.Loop.from_path(self.tmp / "loops" / "L0001.md")
+        rdates = [d.isoformat() for d in reloaded.occurrence_dates()]
+        self.assertEqual(rdates, sorted(rdates), reloaded.occurrences)
+
+    def test_merge_preserves_body_sections(self) -> None:
+        """merge_loops used to wipe keep.body, so save()'s falsy-body fallback
+        regenerated only Statement + Occurrences — the same section-deleting
+        failure refresh_occurrences_section documents for add_occurrence."""
+        keep = V.create_loop("Keep", self.transcript("2026-06-01", "k1"),
+                             D("2026-06-01"))
+        section = "## Superseded conclusions\n\n- [[conclusions/old]]\n"
+        keep.body = keep.body.rstrip() + "\n\n" + section
+        keep.save()
+        retire = V.create_loop("Retire", self.transcript("2026-05-01", "r1"),
+                               D("2026-05-01"))
+        V.merge_loops(keep, retire)
+        reloaded = V.Loop.from_path(self.tmp / "loops" / "L0001.md")
+        self.assertIn(section, reloaded.body,
+                      "custom section did not survive the merge byte-identical")
+        self.assertIn("2026-05-01--r1", reloaded.body,
+                      "occurrences section not refreshed with merged-in link")
+
+    def test_merge_undated_occurrence_sorts_last(self) -> None:
+        keep = V.create_loop("Keep", self.transcript("2026-06-01", "k1"),
+                             D("2026-06-01"))
+        retire = V.create_loop("Retire", self.transcript("2025-03-01", "r1"),
+                               D("2025-03-01"))
+        undated = "[[sources/transcripts/misc/undated-note]]"
+        retire.occurrences.append(undated)
+        merged = V.merge_loops(keep, retire)
+        self.assertEqual(merged.occurrences[-1], undated,
+                         "undated occurrence must sort last, not away")
+
+    def test_merge_enqueues_fold_pending(self) -> None:
+        keep = V.create_loop("Keep", self.transcript("2026-06-01", "k1"),
+                             D("2026-06-01"))
+        shared = self.transcript("2026-06-10", "shared")
+        V.add_occurrence(keep, shared, D("2026-06-10"))
+        retire = V.create_loop("Retire", self.transcript("2026-05-01", "r1"),
+                               D("2026-05-01"))
+        V.add_occurrence(retire, shared, D("2026-06-10"))
+        r1 = retire.occurrences[0]
+
+        def ids(entries):
+            # Enqueue stamps metadata (enqueued_at) that identity ignores.
+            return [{"loop_id": e["loop_id"], "occurrence": e["occurrence"]}
+                    for e in entries]
+
+        before = dc.read_json(self.tmp / "meta" / "fold-pending.json",
+                              default=[])
+        V.merge_loops(keep, retire)
+        entries = dc.read_json(self.tmp / "meta" / "fold-pending.json",
+                               default=[])
+        self.assertIn({"loop_id": "L0001", "occurrence": r1}, ids(entries))
+        # add_occurrence already queued `shared` for keep when keep first
+        # gained it (U8); the merge must not queue it AGAIN — the only new
+        # entry is the genuinely merged-in occurrence.
+        self.assertEqual(ids(entries), ids(before) + [{"loop_id": "L0001",
+                                                       "occurrence": r1}],
+                         "merge must enqueue exactly the merged-in "
+                         "occurrence, no duplicates")
+
+    def test_merge_enqueues_only_after_successful_save(self) -> None:
+        """h3: enqueue AFTER keep.save() succeeds (add_occurrence's
+        after-save discipline) — a failed write must not leave phantom
+        queue entries for folds that will never find the merged page."""
+        keep = V.create_loop("Keep", self.transcript("2026-06-01", "k1"),
+                             D("2026-06-01"))
+        retire = V.create_loop("Retire", self.transcript("2026-05-01", "r1"),
+                               D("2026-05-01"))
+        before = dc.read_json(self.tmp / "meta" / "fold-pending.json",
+                              default=[])
+        orig_save = V.Loop.save
+
+        def boom(self_loop):
+            raise OSError("simulated write failure")
+
+        V.Loop.save = boom
+        try:
+            with self.assertRaises(OSError):
+                V.merge_loops(keep, retire)
+        finally:
+            V.Loop.save = orig_save
+        after = dc.read_json(self.tmp / "meta" / "fold-pending.json",
+                             default=[])
+        self.assertEqual(after, before,
+                         "a failed merge save must leave the queue unchanged")
+
+    def test_enqueue_fold_pending_helper(self) -> None:
+        path = self.tmp / "meta" / "fold-pending.json"
+        self.assertFalse(path.exists(), "file must be created lazily")
+        V.enqueue_fold_pending("L0009", "[[sources/transcripts/x]]")
+        V.enqueue_fold_pending("L0009", "[[sources/transcripts/x]]")  # exact dup
+        V.enqueue_fold_pending("L0009", "[[sources/transcripts/y]]")
+        entries = dc.read_json(path, default=[])
+        self.assertEqual([{"loop_id": e["loop_id"],
+                           "occurrence": e["occurrence"]} for e in entries], [
+            {"loop_id": "L0009", "occurrence": "[[sources/transcripts/x]]"},
+            {"loop_id": "L0009", "occurrence": "[[sources/transcripts/y]]"},
+        ])
+        for e in entries:
+            self.assertIn("enqueued_at", e,
+                          "fold-queue-current ages entries by this stamp")
+
 
 class LintTest(VaultCase):
     def test_clean_vault_passes(self) -> None:
@@ -340,12 +466,77 @@ class LintTest(VaultCase):
                                                             encoding="utf-8")
         self.assertTrue(any("orphan" in x for x in V.lint()))
 
+    def test_disordered_occurrences_detected(self) -> None:
+        loop = V.create_loop("A", self.transcript("2026-07-01", "a"),
+                             D("2026-07-01"))
+        # Bypass add_occurrence (which sorts) to simulate a rogue write path.
+        loop.occurrences.append(self.transcript("2026-06-01", "older"))
+        loop.recurrence_count = loop.distinct_conversations()
+        loop.first_seen = D("2026-06-01")
+        loop.save()
+        problems = V.lint()
+        self.assertTrue(any("chronological" in x and "L0001" in x
+                            for x in problems), problems)
+
+    def test_ordered_occurrences_pass(self) -> None:
+        loop = V.create_loop("A", self.transcript("2026-07-01", "a"),
+                             D("2026-07-01"))
+        V.add_occurrence(loop, self.transcript("2026-06-01", "older"),
+                         D("2026-06-01"))
+        V.add_occurrence(loop, self.transcript("2026-08-01", "newer"),
+                         D("2026-08-01"))
+        self.assertEqual(V.lint(), [])
+
     def test_out_of_vocabulary_tag_detected(self) -> None:
         loop = V.create_loop("A", self.transcript("2026-07-01", "a"), D("2026-07-01"))
         loop.tags = ["architecture", "made-up-tag"]
         loop.save()
         problems = V.lint(vocabulary={"architecture"})
         self.assertTrue(any("made-up-tag" in x for x in problems))
+
+    def test_wiped_thread_is_detected(self) -> None:
+        """Rule-15 discipline: the body-wipe repair ships with its invariant.
+        Every transcript occurrence of a non-archived loop must be either
+        folded (cited in a trajectory line) or queued in fold-pending. A body
+        rebuilt from default_body deletes the trajectory while the queue holds
+        nothing — exactly this signature."""
+        occ = self.transcript("2026-07-01", "a")
+        loop = V.create_loop("A", occ, D("2026-07-01"))
+        # Fold it, then simulate a body wipe: thread gone, queue empty.
+        import apply_thread as AT
+        AT.apply_fold(loop.id, occ, D("2026-07-01"),
+                      {"now": f"Open ({occ} via thread).",
+                       "trajectory_line": "raised"})
+        loop = V.Loop.from_path(loop.path)
+        loop.body = V.default_body(loop)
+        loop.save()
+        problems = V.lint()
+        self.assertTrue(any("neither folded" in x and "L0001" in x
+                            for x in problems), problems)
+
+    def test_queued_unfolded_occurrence_passes(self) -> None:
+        """Pending work is not a violation: a freshly created loop's
+        occurrence sits in fold-pending until the next drain."""
+        V.create_loop("A", self.transcript("2026-07-01", "a"), D("2026-07-01"))
+        self.assertEqual(V.lint(), [])
+
+    def test_folded_occurrence_with_empty_queue_passes(self) -> None:
+        occ = self.transcript("2026-07-01", "a")
+        loop = V.create_loop("A", occ, D("2026-07-01"))
+        import apply_thread as AT
+        AT.apply_fold(loop.id, occ, D("2026-07-01"),
+                      {"now": f"Open ({occ} via thread).",
+                       "trajectory_line": "raised"})
+        self.assertEqual(dc.read_json(self.tmp / "meta" / "fold-pending.json",
+                                      default=[]), [])
+        self.assertEqual(V.lint(), [])
+
+    def test_archived_loop_is_exempt_from_thread_coverage(self) -> None:
+        occ = self.transcript("2026-07-01", "a")
+        loop = V.create_loop("A", occ, D("2026-07-01"))
+        V.archive_loop(loop)
+        dc.atomic_write_json(self.tmp / "meta" / "fold-pending.json", [])
+        self.assertEqual(V.lint(), [])
 
 
 if __name__ == "__main__":

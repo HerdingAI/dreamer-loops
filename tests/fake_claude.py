@@ -46,6 +46,10 @@ def extraction_reply(prompt: str) -> dict:
             "transcript": path,
             "date": date.group(3) if date else "2026-07-01",
             "theme_note": spec.get("theme", "untagged theme note"),
+            # Fixture-driven so the sim exercises BOTH tag paths: a
+            # vocabulary tag that must land in frontmatter, and an
+            # out-of-vocabulary one the applier must drop (CLAUDE.md rule 4).
+            "tags": spec.get("tags", []),
             "evidence": spec.get("evidence", "left open at end of conversation"),
             "match": {
                 "decision": spec["decision"],
@@ -98,6 +102,15 @@ def dream_reply(prompt: str) -> dict:
         "fetched_urls": spec.get("fetched_urls", []),
         "proposed_tags": spec.get("proposed_tags", []),
     }
+    # Thread rebuild (rules 13/15): when the prompt carries the derived
+    # thread block, a researching dream may return a rebuilt Now citing only
+    # this loop's occurrences — modelled here so apply_conclusion's
+    # replace_now path is exercised end to end by the sim.
+    if "### What Dreamer currently holds" in prompt:
+        occs = re.findall(r"^- `(\[\[[^`]+\]\])`", prompt, re.M)
+        if occs:
+            reply["now"] = ("Refreshed after research: the question remains "
+                            f"open ({occs[-1]} via thread).")
     return reply
 
 
@@ -125,9 +138,88 @@ def judge_reply(prompt: str) -> dict:
             "reason": f"fake judge: token overlap {overlap:.0%}"}
 
 
+def summarize_reply(prompt: str) -> dict:
+    """Deterministic stand-in for the session summariser (ingest-cc).
+
+    Held to the same bar as the real one: whatever it returns has to survive
+    apply_cc_session.check_clean, so it emits no fenced code, no filesystem
+    paths and nothing secret-shaped. A fake that could not pass the production
+    assertion would make that assertion untestable.
+    """
+    project = re.search(r"^- project: `([^`]+)`", prompt, re.M)
+    hint = re.search(r'working title, as a hint only: "([^"]+)"', prompt)
+    first = re.search(r"^\[human\] (.+)$", prompt, re.M)
+
+    if hint:
+        subject = hint.group(1)
+    elif project:
+        subject = project.group(1).strip("-").replace("-", " ")
+    else:
+        subject = "untitled session"
+
+    # Only word characters and light punctuation survive, so a path or a key
+    # in the source session cannot ride through the fake into the page.
+    opener = re.sub(r"[^A-Za-z0-9 ,.'?-]", " ", first.group(1))[:80].strip() \
+        if first else ""
+
+    return {
+        "title": subject,
+        "goal": f"Wanted to work through {subject}.",
+        "solution": "Settled on the approach talked through in the session.",
+        "outcome": "The work described was carried out.",
+        "unresolved": "Whether the approach holds once it meets real data.",
+        "turns": [
+            {"role": "human", "text": opener or "Opened the session."},
+            {"role": "assistant",
+             "text": "Laid out the options and asked which one to take."},
+        ],
+    }
+
+
+def thread_fold_reply(prompt: str) -> dict | str:
+    """Deterministic stand-in for the thread-fold skill (rule 15).
+
+    Held to the same discipline the real prompt demands: it cites ONLY the
+    occurrence wikilink named in the prompt header, and it never reproduces
+    transcript content — directive-shaped text in the occurrence is described,
+    never copied (rule 10). That restraint is what makes the sim's
+    "directive never reaches the page" assertion meaningful; the applier-level
+    guarantees live in scripts/apply_thread.py's validation contract.
+    """
+    occ = re.search(r"^- wikilink: (\[\[[^\]]+\]\])$", prompt, re.M)
+    title = re.search(r"^- title: (.+)$", prompt, re.M)
+    link = occ.group(1) if occ else "[[sources/transcripts/unknown]]"
+
+    # Failure mode for the sim's bounded-retry scenario: when the env names
+    # this fold's loop id or an occurrence substring, the responder violates
+    # the JSON contract the way a real model does — prose instead of payload
+    # (returned raw so main() emits it verbatim and apply_thread refuses it).
+    fail = os.environ.get("DREAMER_FAKE_FOLD_FAIL", "")
+    if fail:
+        loop_id = re.search(r"^- id: (L\d+)$", prompt, re.M)
+        ident = (loop_id.group(1) if loop_id else "") + " " + link
+        if fail in ident:
+            return ("I looked at the occurrence but the thread feels "
+                    "unchanged, so I will just describe it in prose instead "
+                    "of the JSON contract.")
+    t = (title.group(1).strip().rstrip("?").lower()
+         if title else "the idea")
+    now = (f"The owner returned to {t} without settling it "
+           f"({link} via thread). The latest pass restates the question "
+           f"rather than resolving it ({link} via thread).")
+    return {"now": now,
+            "trajectory_line": "returned to the question; still unresolved"}
+
+
 def main() -> int:
     prompt = Path(sys.argv[1]).read_text(encoding="utf-8")
-    if "Stage-B pairwise judgment" in prompt:
+    # Thread-fold first: its prompt embeds raw transcript content, which could
+    # contain any of the other responders' marker strings.
+    if "# Thread fold" in prompt:
+        out = thread_fold_reply(prompt)
+    elif "ingest-cc" in prompt or "Session reconstruction" in prompt:
+        out = summarize_reply(prompt)
+    elif "Stage-B pairwise judgment" in prompt:
         out = judge_reply(prompt)
     elif "weekly-dream" in prompt or "Step 1 — Route" in prompt:
         out = dream_reply(prompt)

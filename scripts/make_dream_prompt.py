@@ -9,6 +9,12 @@ import vault as V  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# Rule 13/15: the living thread is Dreamer's own folded output. It rides into
+# the prompt as context, but only AFTER the primary occurrences and under a
+# heading that names its tier, so the dream re-tests it instead of citing it.
+DERIVED_HEADING = ("### What Dreamer currently holds "
+                   "(derived — re-test, do not trust)")
+
 
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -37,6 +43,17 @@ def main() -> int:
     for occ in loop.occurrences:
         target = V._resolve_wikilink(occ)
         lines.append(f"- `{occ}`" + (f" — absolute: `{target}`" if target else " — MISSING"))
+
+    # Living thread, explicitly AFTER the primary occurrences (rule 13): it is
+    # Dreamer's own fold output — a hypothesis to re-test, never evidence.
+    thread = V.thread_section(loop.body or "")
+    if thread:
+        lines += ["", DERIVED_HEADING, "",
+                  "Rule 13: the block below is Dreamer's own folded output — "
+                  "a hypothesis to re-test against the primary occurrences "
+                  "above, never citable as evidence.",
+                  "", "```", thread, "```"]
+
     lines += ["", "### Loop page body", "", "```", loop.body.strip(), "```", ""]
 
     # Rule 14: a loop with an existing conclusion gets it injected as a labeled

@@ -152,6 +152,7 @@ Return **only** a single JSON object on stdout. No prose, no fences.
   "web_queries": ["every outbound query you issued, verbatim"],
   "fetched_urls": ["every URL you fetched"],
   "decision_framing": "Only for route=decision-only: what the decision is, the trade-offs, and what information would change the answer.",
+  "now": "Optional — see the thread-rebuild rule below.",
   "proposed_tags": []
 }
 ```
@@ -180,6 +181,15 @@ Rules:
   unless a tag genuinely recurs across several loops.
 - `web_queries` and `fetched_urls` must be complete. They are printed in the
   digest so the owner can see everything that left the machine.
+- **Thread rebuild (CLAUDE.md rules 13/15).** If this prompt contains a
+  "What Dreamer currently holds" block and you actually researched (any route
+  except `decision-only`), you MAY include a top-level `"now"` field: one to
+  three sentences re-deriving that thread's **Now** from the primary sources
+  above, citing only this loop's occurrence wikilinks. The applier replaces
+  the thread's Now with it — the trajectory is untouched — and validates
+  every citation. Omit it when serving, when there is no thread block, or
+  when the research did not move the picture. `decision-only` never includes
+  it: zero research means nothing to rebuild from.
 - If the honest answer is "no research resolves this", set
   `route: "decision-only"` and fill `decision_framing`. That is a legitimate
   terminal state, not a failure.

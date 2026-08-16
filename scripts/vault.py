@@ -18,8 +18,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from dreamer_common import (  # noqa: E402
-    CFG, as_date, atomic_write, go_live_date, log, p, read_page, today,
-    write_page,
+    CFG, as_date, atomic_write, atomic_write_json, go_live_date, log, p,
+    read_json, read_page, today, write_page,
 )
 
 STATUSES = {"open", "researching", "paused", "decision-only", "archived"}
@@ -188,6 +188,52 @@ def refresh_occurrences_section(loop: Loop) -> str:
 
 
 # --------------------------------------------------------------------------
+# Living thread section (CLAUDE.md rules 1/15)
+# --------------------------------------------------------------------------
+# One section per loop page, derived tier by declaration in its own heading.
+# The applier (scripts/apply_thread.py) owns its content; these helpers own
+# the sectioning so every reader and writer agrees on the boundaries — the
+# same surgical approach refresh_occurrences_section uses, for the same
+# reason: full-body regeneration silently deletes sibling sections.
+
+THREAD_HEADING = "## Thread (derived — hypothesis, not evidence)"
+
+_THREAD_SECTION = re.compile(
+    rf"^{re.escape(THREAD_HEADING)}\s*$(.*?)(?=^## |\Z)", re.M | re.S)
+
+_TRANSCRIPT_LINK = re.compile(r"\[\[\s*sources/transcripts/")
+
+
+def thread_section(body: str) -> str | None:
+    """The Thread section's inner content (stripped), or None if absent."""
+    m = _THREAD_SECTION.search(body or "")
+    return m.group(1).strip() if m else None
+
+
+def replace_named_section(body: str, heading: str, content: str) -> str:
+    """Replace (or append) EXACTLY the named `## `-level section of a body.
+
+    Boundary convention shared by every section regex in this repo: the
+    heading line up to the next '## ' or EOF. The lambda replacement keeps
+    regex escapes in `content` inert — text containing a backslash must not
+    corrupt the page.
+    """
+    section_re = re.compile(
+        rf"^{re.escape(heading)}\s*$(.*?)(?=^## |\Z)", re.M | re.S)
+    section = f"{heading}\n\n{content.strip()}\n\n"
+    if not body:
+        return section
+    if section_re.search(body):
+        return section_re.sub(lambda _m: section, body, count=1)
+    return body.rstrip() + f"\n\n{section}"
+
+
+def replace_thread_section(body: str, content: str) -> str:
+    """Replace (or append) EXACTLY the Thread section of a loop body."""
+    return replace_named_section(body, THREAD_HEADING, content)
+
+
+# --------------------------------------------------------------------------
 # Directory access
 # --------------------------------------------------------------------------
 
@@ -230,6 +276,29 @@ def load_loops(include_archived: bool = False) -> list[Loop]:
     return out
 
 
+def load_loop(loop_id: str) -> Loop | None:
+    """One non-archived loop by id, or None — the single-loop equivalent of
+    `next((l for l in load_loops() if l.id == loop_id), None)` without the
+    directory scan.
+
+    save() keeps the filename == id invariant, so the page lives at
+    loops_dir()/<id>.md. The same exclusions as load_loops() apply: an
+    unreadable page, a page without an id, or a merge-redirect stub is not a
+    loop.
+    """
+    path = loops_dir() / f"{loop_id}.md"
+    if not path.exists():
+        return None
+    try:
+        loop = Loop.from_path(path)
+    except Exception as exc:  # noqa: BLE001
+        log(f"LINT skip unreadable loop {path.name}: {exc}", job="vault")
+        return None
+    if loop.id != loop_id or loop.type == "loop-redirect":
+        return None
+    return loop
+
+
 def next_loop_id() -> str:
     """Monotonic across active AND archived pages, so an id is never reused."""
     highest = 0
@@ -256,6 +325,14 @@ def create_loop(title: str, occurrence: str, date: _dt.date,
     )
     loop.recurrence_count = loop.distinct_conversations()
     loop.save()
+    # Living thread (rule 15): the thread starts from the FIRST occurrence,
+    # so creation enqueues exactly like add_occurrence does. Gate on the link,
+    # not the caller: apply_extraction (the only production caller) always
+    # passes a transcript, but a resurfacing must never fold regardless of who
+    # passed it (rule 13). After save(), so a failed write never leaves a
+    # phantom entry.
+    if _TRANSCRIPT_LINK.match(occurrence):
+        enqueue_fold_pending(loop.id, occurrence)
     return loop
 
 
@@ -292,6 +369,13 @@ def add_occurrence(loop: Loop, occurrence: str, date: _dt.date) -> bool:
             loop.path = loops_dir() / f"{loop.id}.md"
     loop.body = refresh_occurrences_section(loop)
     loop.save()
+    # Living thread (rule 15): every NEW transcript occurrence queues exactly
+    # one incremental fold. The check is on the wikilink prefix, not the
+    # caller: resurfacing links are a relevance signal, never fold input
+    # (rule 13), and reopening flows through here so reopened loops enqueue
+    # naturally. After save(), so a failed write never leaves a phantom entry.
+    if _TRANSCRIPT_LINK.match(occurrence):
+        enqueue_fold_pending(loop.id, occurrence)
     return True
 
 
@@ -313,14 +397,14 @@ def regenerate_catalog() -> Path:
         "One line per active loop. Agents read this FIRST and open full pages",
         "only on candidate hits (CLAUDE.md rule 11).",
         "",
-        "| id | title | status | count | last_seen |",
-        "|---|---|---|---|---|",
+        "| id | title | status | first_seen | count | last_seen |",
+        "|---|---|---|---|---|---|",
     ]
     for l in loops:
         title = l.title.replace("|", "\\|")
         lines.append(
-            f"| {l.id} | {title} | {l.status} | {l.recurrence_count} | "
-            f"{l.last_seen or '—'} |"
+            f"| {l.id} | {title} | {l.status} | {l.first_seen or '—'} | "
+            f"{l.recurrence_count} | {l.last_seen or '—'} |"
         )
     path = loops_dir() / CATALOG
     atomic_write(path, "\n".join(lines) + "\n")
@@ -433,13 +517,46 @@ def recover_stranded(ref: _dt.date | None = None) -> list[Loop]:
 # Merge (§6.6)
 # --------------------------------------------------------------------------
 
+def enqueue_fold_pending(loop_id: str, occurrence: str) -> bool:
+    """Queue (loop_id, occurrence) for a later body-fold pass.
+
+    Append-only ledger at meta/fold-pending.json, created lazily. The consumer
+    collapses duplicates on read, so append-only is safe; the duplicate check
+    here (on the identity fields only — entries also carry metadata) just
+    keeps the file from growing on idempotent re-runs. `enqueued_at` feeds the
+    fold-queue-current healthcheck's age leg; `attempts` is stamped later by
+    fold_pending.record_attempt. Returns True if the entry was actually added
+    (False on duplicate), so the thread-backfill drain can report honest
+    counts.
+    """
+    path = p("meta") / "fold-pending.json"
+    entries = read_json(path, default=[]) or []
+    for e in entries:
+        if (isinstance(e, dict) and e.get("loop_id") == loop_id
+                and e.get("occurrence") == occurrence):
+            return False
+    entries.append({"loop_id": loop_id, "occurrence": occurrence,
+                    "enqueued_at": _dt.datetime.now()
+                    .isoformat(timespec="seconds")})
+    atomic_write_json(path, entries)
+    return True
+
+
 def merge_loops(keep: Loop, retire: Loop) -> Loop:
     """Union of occurrences; recurrence_count = distinct conversations in that
     union (NOT max, NOT naive sum); earliest first_seen; redirect stub at the
     retired path so inbound links never break."""
+    merged_in: list[str] = []
     for occ in retire.occurrences:
         if occ not in keep.occurrences:
             keep.occurrences.append(occ)
+            # The keep page's body has never folded this occurrence in;
+            # collected here, queued only after keep.save() succeeds below.
+            merged_in.append(occ)
+    # Same chronological invariant add_occurrence maintains: append order is
+    # merge order, and a retire loop older than the keep loop would otherwise
+    # leave the idea's history unreadable.
+    keep.occurrences.sort(key=_occurrence_sort_key)
     keep.recurrence_count = keep.distinct_conversations()
     firsts = [d for d in (keep.first_seen, retire.first_seen) if d]
     lasts = [d for d in (keep.last_seen, retire.last_seen) if d]
@@ -448,8 +565,16 @@ def merge_loops(keep: Loop, retire: Loop) -> Loop:
     for t in retire.tags:
         if t not in keep.tags:
             keep.tags.append(t)
-    keep.body = ""
+    # Surgical refresh, NOT keep.body = "": wiping the body made save() fall
+    # back to default_body(), which regenerates only Statement + Occurrences
+    # and silently deletes every other section — the same failure documented
+    # on refresh_occurrences_section for add_occurrence.
+    keep.body = refresh_occurrences_section(keep)
     keep.save()
+    # AFTER the save, matching add_occurrence's discipline: a failed write
+    # must never leave phantom queue entries for a merge that did not land.
+    for occ in merged_in:
+        enqueue_fold_pending(keep.id, occ)
 
     stub_fm = {
         "type": "loop-redirect",
@@ -477,8 +602,35 @@ def merge_loops(keep: Loop, retire: Loop) -> Loop:
 # Lint (§6.2 DoD)
 # --------------------------------------------------------------------------
 
+# A trajectory line as apply_thread writes it: "- YYYY-MM-DD — text — [[occ]]".
+_TRAJ_CITE = re.compile(r"^- \d{4}-\d{2}-\d{2} — .+? — \[\[([^\]]+)\]\]\s*$",
+                        re.M)
+
+
 def lint(vocabulary: set[str] | None = None) -> list[str]:
     problems: list[str] = []
+    # Thread coverage (rule-15 repair discipline): every transcript occurrence
+    # of a non-archived loop must be either FOLDED (cited by a trajectory line
+    # in the Thread section) or QUEUED in fold-pending.json. This is the
+    # strongest cheap invariant that catches the body-wipe class of defect
+    # (a page rebuilt from default_body loses its trajectory while the queue
+    # holds nothing) — note it reads one piece of vault-meta state alongside
+    # the page, because page state alone cannot distinguish "wiped" from
+    # "never folded". On a pre-thread vault this check fires honestly until
+    # bin/thread-backfill.sh's first run enqueues the initial threads.
+    pending: set[tuple[str, str]] = set()
+    for e in read_json(p("meta") / "fold-pending.json", default=[]) or []:
+        if isinstance(e, dict):
+            pending.add((str(e.get("loop_id")), str(e.get("occurrence"))))
+    # Quarantined entries (fold_pending.record_attempt, over
+    # thread.fold_max_attempts) are a NAMED problem — "N failed folds" points
+    # at the defective fold input, where the generic uncovered message would
+    # misread it as a wiped thread.
+    quarantined: dict[tuple[str, str], int] = {}
+    for e in read_json(p("meta") / "fold-quarantine.json", default=[]) or []:
+        if isinstance(e, dict):
+            quarantined[(str(e.get("loop_id")), str(e.get("occurrence")))] = \
+                int(e.get("attempts") or 0)
     if vocabulary is None:
         # Once the owner freezes a vocabulary, lint enforces it automatically.
         # Before that, tags are expected to be absent entirely.
@@ -506,11 +658,38 @@ def lint(vocabulary: set[str] | None = None) -> list[str]:
             problems.append(
                 f"{where}: recurrence_count={loop.recurrence_count} but "
                 f"{loop.distinct_conversations()} distinct occurrences")
+        # Occurrence ordering: every write path must leave the list sorted by
+        # _occurrence_sort_key (add_occurrence and merge_loops both do).
+        if loop.occurrences != sorted(loop.occurrences, key=_occurrence_sort_key):
+            problems.append(f"{where}: occurrences not in chronological order")
         # Broken occurrence links
         for occ in loop.occurrences:
             target = _resolve_wikilink(occ)
             if target is None:
                 problems.append(f"{where}: broken occurrence link {occ!r}")
+        # Thread coverage — see the comment at the top of lint().
+        if loop.status != "archived":
+            folded = {_norm(m) for m in
+                      _TRAJ_CITE.findall(thread_section(loop.body) or "")}
+            for occ in loop.occurrences:
+                if not _TRANSCRIPT_LINK.match(occ):
+                    continue
+                if _norm(occ) in folded:
+                    continue
+                if (loop.id, occ) in quarantined:
+                    problems.append(
+                        f"{where}: transcript occurrence {occ!r} quarantined "
+                        f"after {quarantined[(loop.id, occ)]} failed folds — "
+                        f"repair the fold input and re-enqueue "
+                        f"(fold-quarantine.json)")
+                    continue
+                if (loop.id, occ) in pending:
+                    continue
+                problems.append(
+                    f"{where}: transcript occurrence {occ!r} is neither "
+                    f"folded into the Thread section nor queued in "
+                    f"fold-pending — a body rebuild may have wiped the "
+                    f"thread (for pre-thread loops, run bin/thread-backfill.sh)")
         # Conclusions must exist and be linked back
         if loop.conclusion:
             if _resolve_wikilink(loop.conclusion) is None:

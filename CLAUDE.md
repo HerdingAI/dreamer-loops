@@ -28,12 +28,15 @@ conclusion: ""            # wikilink, set only when a conclusion page exists
 tags: [architecture]      # controlled vocabulary ONLY — see rule 4
 ```
 
+The page body also carries one `## Thread (derived — hypothesis, not
+evidence)` section: the loop's latest synthesized state (rule 15).
+
 Legal transitions. Any other transition is a bug; refuse it and log.
 
 | From | To | Trigger |
 |---|---|---|
 | *(new)* | `open` | Extraction finds an unresolved thread matching no existing loop |
-| `open` | `open` | New transcript matches → append occurrence, bump `last_seen` |
+| `open` | `open` | New transcript matches → append occurrence, bump `last_seen`, refresh the thread |
 | `paused` / `decision-only` / `archived` | `open` | Topic resurfaces (reopening rule) |
 | `open` | `researching` | Weekly dream selects it |
 | `researching` | `paused` | Conclusion written and linked |
@@ -274,6 +277,32 @@ dream prompt makes the semantic serve/re-research call and may return
 
 Re-processing must stay linear in *new input*, never proportional to the size
 of what Dreamer has already written.
+
+## 15. Living thread
+
+Each loop body keeps one `## Thread (derived — hypothesis, not evidence)`
+section: a `**Now**` paragraph and an append-only `**Trajectory**` list. The
+thread is derived tier — rule 13 applies in full, and a citation carrying the
+`via thread` marker grades derived. It refreshes **only** on a matching
+transcript occurrence (rule 2: zero diff on nights of unrelated input), and a
+fold's input is the current thread plus the ONE new occurrence — never the
+loop's accumulated history (rule 14). Every future repair of a defect in the
+state relationships this rule touches ships with a matching healthcheck
+assertion or lint invariant (the R24 growth discipline).
+
+The healthcheck (`scripts/healthcheck.py`) is the system's assertion spine:
+mechanical comparisons of two pieces of existing state, run at the top of
+every job, never an LLM call, never a mutation. Severities are `info`
+(recorded), `degraded` (digest event), and `blocking` (event + the named leg
+in `health.blocked_legs` of `run-state.json`, which jobs consult via
+`leg_blocked`). A blocked leg exits cleanly with its reason evented — a
+blocked night must read as legibly as a quiet one.
+
+One-time initialization carve-out: the thread and tag backfills
+(`bin/thread-backfill.sh`, `bin/tag-backfill.sh`) may touch `paused` and
+`decision-only` pages once, at feature initialization — without it the
+backfill's value dies against rule 2, the same tension rule 3's GO_LIVE floor
+resolves for decay; rule 2 binds every night thereafter.
 
 ---
 

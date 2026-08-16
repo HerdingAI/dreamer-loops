@@ -85,6 +85,9 @@ budget:
   max_turns_nightly:  60
   max_turns_weekly:   150
   max_turns_backfill: 80
+  # The thread fold reads one inlined transcript plus the current thread and
+  # returns JSON. It runs RESTRICTED (run_claude 4th arg): no tools at all.
+  max_turns_thread_fold: 8
   # Model for headless job runs. The jobs are high-volume and structured, so
   # a cheaper model per call means more calls before any usage window closes.
   model: sonnet
@@ -120,6 +123,9 @@ research:
 
 # --- thread (living-thread fold queue; see CLAUDE.md rule 15) -------------
 thread:
+  # Nightly fold cap: bounds a run's fold spend; entries over the cap stay
+  # queued and drain on the next run.
+  fold_per_run: 20
   # A fold that keeps failing is a defect, not work to re-buy every night:
   # after this many attempts the entry is moved to
   # vault/.vault-meta/fold-quarantine.json with one degraded event.
@@ -130,6 +136,10 @@ thread:
   # ...and any entry older than this many days means the drain has stopped
   # retiring it. Entries without an enqueued_at stamp count as fresh.
   fold_queue_max_age_days: 7
+  # One-time thread backfill (bin/thread-backfill.sh) drain cap — counted in
+  # FOLD PASSES, not loops. This key (and the script) are safe to delete once
+  # the backfill reports drain complete.
+  backfill_per_run: 60
 
 # --- health (mechanical self-checks; see CLAUDE.md rule 15) ---------------
 health:

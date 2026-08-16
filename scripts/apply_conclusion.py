@@ -35,10 +35,43 @@ SUPPORT_MARK = {"accepted": "✓ accepted", "provisional": "~ provisional",
 # none of them are evidence.
 _DERIVED_CITE = re.compile(
     r"\[\[\s*(conclusions/|sources/resurfacings/|loops/)", re.I)
-
+# A living-thread citation renders as "([[sources/transcripts/...]] via
+# thread)" (rule 15). The link target is primary, but the sentence citing it
+# is Dreamer's own fold output — the marker, not the target, carries the tier
+# (rule 13), so `via thread` adjacent to the wikilink grades derived.
+_VIA_THREAD_CITE = re.compile(r"\]\]\s*via thread\b", re.I)
 
 def _is_derived(citation: str) -> bool:
-    return bool(_DERIVED_CITE.search(citation or ""))
+    c = citation or ""
+    return bool(_DERIVED_CITE.search(c) or _VIA_THREAD_CITE.search(c))
+
+
+def _neutralize_structure(text: str, problems: list[str]) -> str:
+    """Line-start structure in model output must not become PAGE structure.
+
+    Decision framing lands inside the loop page's '## Decision framing'
+    section; a line opening with a heading marker or an HR/frontmatter fence
+    would end that section and plant one the applier does not own (a second
+    Thread heading is the canonical bad case). Headings are prefix-escaped to
+    plain text (leading #s stripped), fence lines are dropped, and the edit
+    is logged — the words survive, the structure does not (the same safety
+    valve apply_thread._flatten provides for fold output).
+    """
+    out: list[str] = []
+    changed = 0
+    for line in (text or "").splitlines():
+        if re.match(r"^#{1,6}\s", line):
+            out.append(re.sub(r"^#{1,6}\s+", "", line))
+            changed += 1
+        elif re.match(r"^---\s*$", line):
+            changed += 1  # dropped: a bare fence carries no words to keep
+        else:
+            out.append(line)
+    if changed:
+        problems.append(f"decision framing contained {changed} structural "
+                        f"line(s) (headings/fences) — neutralized to plain "
+                        f"text before insertion")
+    return "\n".join(out).strip()
 
 
 def _slug(text: str, maxlen: int = 60) -> str:
@@ -214,10 +247,20 @@ def apply(loop_id: str, payload: dict) -> dict:
     loop.route = route
 
     if route == "decision-only":
-        framing = (payload.get("decision_framing") or "").strip()
-        body = V.default_body(loop)
+        if (payload.get("now") or "").strip():
+            problems.append("decision-only route returned a thread 'now' — "
+                            "ignored: zero research is its defining property "
+                            "and a rebuilt Now claims research happened")
+        framing = _neutralize_structure(
+            (payload.get("decision_framing") or "").strip(), problems)
+        # Surgical, never default_body: rebuilding the whole body destroyed
+        # the Thread and Theme sections on the decision-only transition
+        # (observed live: L0003's thread vanished) — the same body-wipe class
+        # merge_loops and add_occurrence already fixed. Replace or append
+        # ONLY the '## Decision framing' section.
+        body = loop.body or V.default_body(loop)
         if framing:
-            body += f"\n## Decision framing\n\n{framing}\n"
+            body = V.replace_named_section(body, "## Decision framing", framing)
         loop.body = body
         loop.status = "decision-only"
         loop.save()
@@ -266,6 +309,22 @@ def apply(loop_id: str, payload: dict) -> dict:
         loop.conclusion = f"conclusions/{dest.stem}"
         loop.status = "paused"
         loop.save()
+
+        # Drift correction (rules 13/15): a dream that re-derived the loop
+        # from primary occurrences may return a rebuilt thread `now`.
+        # apply_thread.replace_now swaps ONLY the Now paragraph (trajectory
+        # untouched) under the same validation contract as a fold. A refusal
+        # is a problem, never a failure — the conclusion above is already
+        # written and the stale derived Now merely stays visibly derived.
+        now_text = (payload.get("now") or "").strip()
+        if now_text:
+            import apply_thread as AT
+            try:
+                AT.replace_now(loop.id, now_text)
+                log(f"thread Now rebuilt for {loop.id} from the re-research",
+                    job="conclusion")
+            except AT.FoldError as exc:
+                problems.append(f"thread 'now' rebuild refused: {exc}")
         G.stage("conclusions", {"path": loop.conclusion, "loop": loop.id,
                                 "title": fm["title"], "route": route,
                                 "confidence": fm["confidence"]})

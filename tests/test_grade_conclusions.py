@@ -140,6 +140,53 @@ class RubricTest(unittest.TestCase):
 
 
 
+class ViaThreadCitationTest(unittest.TestCase):
+    """Rule 15: a `via thread` citation is Dreamer's own fold output citing a
+    transcript — the LINK is primary but the SENTENCE is derived, so the
+    marker (not the link target) carries the tier. It must grade derived and
+    cap at contested, while a bare transcript citation stays primary."""
+
+    def setUp(self) -> None:
+        import apply_conclusion as AC
+        self.AC = AC
+
+    def test_via_thread_citation_is_derived(self) -> None:
+        for cite in ("[[sources/transcripts/2026/05/2026-05-03--nas]] via thread",
+                     "([[sources/transcripts/2026/05/2026-05-03--nas]] via thread)"):
+            with self.subTest(cite=cite):
+                self.assertTrue(self.AC._is_derived(cite))
+
+    def test_bare_transcript_citation_stays_primary(self) -> None:
+        self.assertFalse(self.AC._is_derived(
+            "[[sources/transcripts/2026/05/2026-05-03--nas]]"))
+
+    def test_render_caps_via_thread_at_contested_and_quarantines(self) -> None:
+        import vault as V
+        loop = V.Loop(id="L0001", title="T")
+        payload = {"route": "wisdom", "confidence": "medium", "sections": {
+            "owner_previously_concluded": [
+                {"claim": "Restated from the living thread.",
+                 "citation": "[[sources/transcripts/2026/05/2026-05-03--nas]]"
+                             " via thread",
+                 "support": "accepted"},
+                {"claim": "The owner's own words.",
+                 "citation": "[[sources/transcripts/2026/05/2026-05-03--nas]]",
+                 "support": "accepted"},
+            ]}}
+        problems: list[str] = []
+        text = self.AC.render(loop, payload, problems)
+        self.assertIn("## Prior conclusions (derived — hypothesis, not evidence)",
+                      text)
+        derived_block = text.split("## Prior conclusions")[1]
+        self.assertIn("Restated from the living thread.", derived_block)
+        self.assertIn("[! contested]", derived_block)
+        self.assertNotIn("The owner's own words.", derived_block)
+        primary_block = text.split("## Prior conclusions")[0]
+        self.assertIn("**[✓ accepted]** The owner's own words.", primary_block)
+        self.assertTrue(any("via thread" in p or "capped" in p
+                            for p in problems), problems)
+
+
 class VersionVsVarianceTest(RubricTest):
     """A superseded page and its replacement are versions, not samples.
 
