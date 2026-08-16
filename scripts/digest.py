@@ -23,7 +23,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from dreamer_common import (  # noqa: E402
-    CFG, as_date, atomic_write, atomic_write_json, log, p, read_json, today,
+    CFG, as_date, atomic_write, atomic_write_json, hours_since, log, p,
+    read_json, today, update_run_state,
 )
 import vault as V  # noqa: E402
 
@@ -146,11 +147,61 @@ def read_events() -> list[dict]:
 
 
 def clear_events() -> None:
+    # Locked read-merge-replace (dreamer_common.update_run_state): an unlocked
+    # write here could clobber a cost/health record landing concurrently.
     path = p("meta") / "run-state.json"
-    state = read_json(path, default={}) or {}
-    if state.get("events"):
-        state["events"] = []
-        atomic_write_json(path, state)
+
+    def mutate(state: dict) -> None:
+        if state.get("events"):
+            state["events"] = []
+
+    update_run_state(path, mutate)
+
+
+def health_lines() -> list[str]:
+    """One-line health summary from run-state's `health` key (healthcheck.py).
+
+    A missing record renders as "never checked" rather than nothing or a
+    crash — an unmonitored system must not look like a healthy one. A record
+    older than health.checked_max_age_hours gets an explicit staleness
+    warning: the checker's own liveness is part of what is being reported.
+    """
+    state = read_json(p("meta") / "run-state.json", default={}) or {}
+    health = state.get("health") or {}
+    checked_at = health.get("checked_at")
+    if not checked_at:
+        return ["> [!warning] Health",
+                "> health: never checked — `scripts/healthcheck.py` has not "
+                "recorded a run."]
+
+    results = health.get("assertions") or []
+    ok_n = sum(1 for r in results if r.get("ok"))
+    failed = [r for r in results if not r.get("ok")]
+    deg = sum(1 for r in failed if r.get("severity") == "degraded")
+    blk = sum(1 for r in failed if r.get("severity") == "blocking")
+    blocked = health.get("blocked_legs") or []
+
+    summary = (f"> health: {ok_n} ok, {deg} degraded, {blk} blocking of "
+               f"{len(results)} assertion(s), checked {checked_at}")
+    if blocked:
+        summary += " — blocked legs: " + ", ".join(blocked)
+
+    max_age = float(CFG["health"]["checked_max_age_hours"])
+    stale = None
+    age_h = hours_since(checked_at)
+    if age_h is None:
+        stale = (f"> **health not checked since a parseable time** "
+                 f"(checked_at={checked_at!r}) — treat the record as stale.")
+    elif age_h > max_age:
+        stale = (f"> **health not checked since {checked_at}** "
+                 f"({age_h:.0f}h ago, window {max_age:g}h) — the checker "
+                 f"itself may be down.")
+
+    kind = "warning" if (stale or blocked or deg or blk) else "info"
+    lines = [f"> [!{kind}] Health", summary]
+    if stale:
+        lines.append(stale)
+    return lines
 
 
 def build(ref: _dt.date | None = None, *, run_stats: dict | None = None,
@@ -174,6 +225,10 @@ def build(ref: _dt.date | None = None, *, run_stats: dict | None = None,
     banner = freshness_banner(ref)
     if banner:
         out += ["> [!warning] Freshness", f"> {banner}", ""]
+
+    # Health sits with freshness: both answer "can this digest be trusted to
+    # describe a system that is actually running?".
+    out += health_lines() + [""]
 
     if quiet_reason:
         out += ["> [!info] Quiet week", f"> {quiet_reason}", ""]

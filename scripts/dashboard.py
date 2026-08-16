@@ -174,6 +174,16 @@ def collect() -> dict:
     median = vals[len(vals) // 2] if vals else 0.0
     outliers = [c for c in costs if float(c.get("cost") or 0) > max(20.0, median * 25)]
 
+    # Health record (scripts/healthcheck.py) + its own staleness. The checker
+    # being down must be as visible as anything it would have reported.
+    health = state.get("health") or {}
+    max_age_h = float((cfg.get("health") or {}).get("checked_max_age_hours")
+                      or 0) or None
+    checked_at = health.get("checked_at")
+    age_h = C.hours_since(str(checked_at)) if checked_at else None
+    if age_h is not None:
+        age_h = round(age_h, 1)
+
     # Served loops — rule 14's novelty gate doing its job.
     #
     # pending.json only holds these between the run that stages them and the
@@ -233,6 +243,13 @@ def collect() -> dict:
             "deferrals": len(deferrals),
             "outliers": outliers,
             "recent_events": events[-6:],
+        },
+        "health": {
+            "checked_at": checked_at,
+            "age_hours": age_h,
+            "max_age_hours": max_age_h,
+            "blocked_legs": list(health.get("blocked_legs") or []),
+            "assertions": list(health.get("assertions") or []),
         },
         "pending": pending,
         "served": served,
@@ -304,6 +321,30 @@ def render(d: dict) -> str:
     cells.append(("Deepest conclusion chain", ckind, f"{chain} deep",
                   "How many times one loop's conclusion has been superseded. "
                   "Above 2 is worth a look at the re-research cooldown."))
+
+    H = d.get("health") or {}
+    if not H.get("checked_at"):
+        cells.append(("Health", "warn", "never checked",
+                      "scripts/healthcheck.py has not recorded a run yet."))
+    else:
+        results = H.get("assertions") or []
+        ok_n = sum(1 for r in results if r.get("ok"))
+        failed = len(results) - ok_n
+        blocked = H.get("blocked_legs") or []
+        stale = (H.get("age_hours") is None
+                 or (H.get("max_age_hours") is not None
+                     and H["age_hours"] > H["max_age_hours"]))
+        kind = "crit" if blocked else ("warn" if (stale or failed) else "good")
+        txt = f"{ok_n}/{len(results)} ok"
+        if blocked:
+            txt += f", blocked: {', '.join(blocked)}"
+        if stale:
+            det = (f"Health not checked since {H['checked_at']} — window is "
+                   f"{H.get('max_age_hours')}h; the checker itself may be down.")
+        else:
+            det = (f"Checked {H['checked_at']}. {failed} failing assertion(s)"
+                   f"{', legs blocked: ' + ', '.join(blocked) if blocked else ''}.")
+        cells.append(("Health", kind, txt, det))
 
     dcount = R["deferrals"]
     cells.append(("Deferred runs", "good" if dcount == 0 else "warn",

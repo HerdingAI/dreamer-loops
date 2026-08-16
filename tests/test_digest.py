@@ -118,6 +118,44 @@ class PaddingTest(DigestCase):
                         f"first section opened empty: {body[:60]!r}")
 
 
+class HealthBannerTest(DigestCase):
+    def _health_state(self, checked_at: str, blocked=(), assertions=()) -> None:
+        (self.tmp / "meta" / "run-state.json").write_text(
+            json.dumps({"health": {"checked_at": checked_at,
+                                   "blocked_legs": list(blocked),
+                                   "assertions": list(assertions)}}),
+            encoding="utf-8")
+
+    def test_missing_health_record_says_never_checked_without_crashing(self) -> None:
+        text = G.build(ref=D("2026-08-09")).read_text(encoding="utf-8")
+        self.assertIn("never checked", text)
+
+    def test_stale_checked_at_raises_the_staleness_warning(self) -> None:
+        old = (_dt.datetime.now() - _dt.timedelta(hours=999)) \
+            .isoformat(timespec="seconds")
+        self._health_state(old)
+        text = G.build(ref=D("2026-08-09")).read_text(encoding="utf-8")
+        self.assertIn("not checked since", text)
+        self.assertIn(old, text)
+
+    def test_fresh_health_summarises_without_staleness_warning(self) -> None:
+        now = _dt.datetime.now().isoformat(timespec="seconds")
+        self._health_state(now, assertions=[
+            {"name": "a", "ok": True, "severity": "info",
+             "blocks": [], "detail": ""}])
+        text = G.build(ref=D("2026-08-09")).read_text(encoding="utf-8")
+        self.assertIn("1 ok", text)
+        self.assertNotIn("not checked since", text)
+
+    def test_blocked_legs_are_named_in_the_summary(self) -> None:
+        now = _dt.datetime.now().isoformat(timespec="seconds")
+        self._health_state(now, blocked=["research"], assertions=[
+            {"name": "qmd", "ok": False, "severity": "blocking",
+             "blocks": ["research"], "detail": "down"}])
+        text = G.build(ref=D("2026-08-09")).read_text(encoding="utf-8")
+        self.assertIn("blocked legs: research", text)
+
+
 class RouteStatsTest(DigestCase):
     def test_per_route_counts_appear_in_run_stats(self) -> None:
         """§6.5 requires this specifically to catch decision-only becoming an

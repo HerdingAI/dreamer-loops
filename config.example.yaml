@@ -118,6 +118,35 @@ research:
   # principle-level ones do not.
   web_conclusion_stale_days: 90
 
+# --- thread (living-thread fold queue; see CLAUDE.md rule 15) -------------
+thread:
+  # A fold that keeps failing is a defect, not work to re-buy every night:
+  # after this many attempts the entry is moved to
+  # vault/.vault-meta/fold-quarantine.json with one degraded event.
+  fold_max_attempts: 5
+  # fold-queue-current (healthcheck, degraded): queue depth above this means
+  # folds are enqueued faster than the drain retires them.
+  fold_queue_max: 80
+  # ...and any entry older than this many days means the drain has stopped
+  # retiring it. Entries without an enqueued_at stamp count as fresh.
+  fold_queue_max_age_days: 7
+
+# --- health (mechanical self-checks; see CLAUDE.md rule 15) ---------------
+health:
+  checked_max_age_hours: 16   # longest quiet gap in the cron schedule + slack
+  embed_pending_max: 50       # docs awaiting embedding before retrieval counts degraded
+  index_stale_hours: 30       # nightly reindex cadence + slack
+  untagged_window_days: 14    # window for the vocabulary-applied check
+  cost_max_per_run: 50.00     # above any legitimate single run
+  cost_window_days: 7         # only recent records can trip the cost check
+  gates: []                   # standing owner reminders, e.g.
+                              # - {flag: my_gate, text: "acceptance gate still open"}
+                              # closed by vault/.vault-meta/gate-state.json {"my_gate": true}
+
+# --- qmd (search index) ---------------------------------------------------
+qmd:
+  collections: [vault, transcripts, conclusions, wisdom]
+
 # --- MCP ------------------------------------------------------------------
 mcp:
   transport: stdio              # no TCP listener, so no token to manage
