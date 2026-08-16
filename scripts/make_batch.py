@@ -58,8 +58,40 @@ def select(limit: int) -> list[Path]:
     return out
 
 
+def _vocabulary_section() -> str:
+    """The frozen tag vocabulary as a prompt section, or '' pre-freeze.
+
+    Injected here rather than hardcoded in PROMPT.md so the prompt always
+    matches vault/.vault-meta/tag-vocabulary.json — the same file lint and
+    apply_extraction enforce against. While no vocabulary exists, no section
+    is injected and PROMPT.md instructs the model to emit no tags at all
+    (CLAUDE.md rule 4's pre-freeze state).
+    """
+    try:
+        import propose_tags
+        vocab = propose_tags.vocabulary()
+    except Exception:  # noqa: BLE001 — batch selection must not die on this
+        vocab = None
+    if not vocab:
+        return ""
+    lines = ["## Approved tag vocabulary", "",
+             "The frozen controlled vocabulary (CLAUDE.md rule 4). A candidate's",
+             "`tags` array may draw ONLY from this list:", ""]
+    lines += [f"- `{t}`" for t in sorted(vocab)]
+    return "\n".join(lines) + "\n\n"
+
+
 def render_prompt(batch: list[Path]) -> str:
     template = (ROOT / "skills" / "extract" / "PROMPT.md").read_text(encoding="utf-8")
+    vocab_section = _vocabulary_section()
+    if vocab_section:
+        # The vocabulary is context, not batch content: it belongs before the
+        # "Tonight's batch" heading that closes the template.
+        marker = "## Tonight's batch"
+        if marker in template:
+            template = template.replace(marker, vocab_section + marker, 1)
+        else:
+            template += "\n" + vocab_section
     lines = [template, ""]
     lines.append(f"{len(batch)} transcript(s) to process. Read each with the Read "
                  f"tool at the absolute path given.")

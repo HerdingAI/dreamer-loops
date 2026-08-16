@@ -5,6 +5,7 @@
       "title": "How should agent memory persist across sessions?",
       "decision": "new",
       "theme": "knowledge systems, persistence",
+      "tags": ["note-taking"],
       "evidence": "\"I still don't know whether this should be a file or a DB\"",
       "justification": "No existing loop covers cross-session memory persistence."
     },
@@ -15,6 +16,7 @@
       "title": "Should routing be intent-based or keyword-based?",
       "decision": "new",
       "theme": "routing",
+      "tags": ["not-a-real-tag"],
       "justification": "Distinct from memory persistence; nothing similar in catalog."
     },
     "memory-arch-again.md": {
@@ -133,7 +135,7 @@
         "https://example.invalid/memory-patterns"
       ],
       "proposed_tags": [
-        "knowledge-systems"
+        "note-taking"
       ]
     },
     "L0003": {

@@ -62,7 +62,8 @@ no commentary before or after. The wrapper parses stdout directly.
       "title": "Short canonical statement of the loop, phrased as the open question",
       "transcript": "sources/transcripts/2026/07/2026-07-14--memory-arch",
       "date": "2026-07-14",
-      "theme_note": "One line of free prose about the theme. NOT a tag.",
+      "theme_note": "One line of free prose about the theme.",
+      "tags": ["topic-a"],
       "evidence": "One short quote from the transcript showing the thread was left open.",
       "match": {
         "decision": "new",
@@ -85,8 +86,14 @@ Field rules:
   loop matching use embeddings or an LLM judge?" Bad: "Discussion about matching".
 - `transcript` — exactly the path given to you, without the `.md` suffix.
 - `date` — the transcript's frontmatter `date`.
-- `theme_note` — free prose only. **Do not emit tags.** The controlled
-  vocabulary does not exist yet, and inventing one violates CLAUDE.md rule 4.
+- `theme_note` — free prose. Always present; it complements `tags`, it is not
+  replaced by them.
+- `tags` — chosen **only** from the "Approved tag vocabulary" section of this
+  prompt, if that section is present. Zero tags is a valid and common answer —
+  never force a tag that does not genuinely fit the loop. An unknown tag is
+  dropped at apply time, so inventing one buys nothing. If no "Approved tag
+  vocabulary" section appears in this prompt, the vocabulary is not frozen
+  yet: emit no tags at all (CLAUDE.md rule 4).
 - `match.decision` — `"new"` or `"matched"`.
 - `match.loop_id` — required when matching an EXISTING loop, `null` otherwise.
 - `match.batch_ref` — required when matching an earlier candidate in this same

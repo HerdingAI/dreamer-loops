@@ -75,10 +75,53 @@ def _wikilink(transcript: str) -> str:
     return f"[[{ref}]]"
 
 
+def _load_vocabulary() -> set[str] | None:
+    """The frozen tag vocabulary, or None while rule 4's pre-freeze state
+    holds (no file = no tags may be written, ever)."""
+    try:
+        import propose_tags
+        return propose_tags.vocabulary()
+    except Exception as exc:  # noqa: BLE001 — a broken vocabulary module must
+        # degrade to "no tags", never take the night's extraction down with it.
+        log(f"WARN could not load tag vocabulary ({exc}) — emitting no tags",
+            job="apply")
+        return None
+
+
+def _filter_tags(raw, index: int, vocabulary: set[str] | None,
+                 stats: dict) -> list[str]:
+    """Enforce CLAUDE.md rule 4 on model-emitted tags for a NEW loop.
+
+    Valid vocabulary tags pass through (order preserved, de-duplicated).
+    Anything else is DROPPED with a logged reason — a plausible-sounding
+    invented tag is exactly the case the rule exists for, and one bad tag must
+    not reject an otherwise good candidate. With no frozen vocabulary, every
+    tag is dropped: the pre-freeze state writes no tags at all.
+    """
+    try:
+        from propose_tags import filter_against_vocabulary
+    except Exception as exc:  # noqa: BLE001 — same degradation contract as
+        # _load_vocabulary: a broken propose_tags module must cost the tags,
+        # never the candidate (an unguarded import here rejected it).
+        log(f"WARN could not import the tag filter ({exc}) — emitting "
+            f"no tags for candidate #{index}", job="apply")
+        return []
+    valid, dropped = filter_against_vocabulary(
+        raw, vocabulary, f"candidate #{index}", "apply")
+    stats["tags_dropped"].extend(dropped)
+    return valid
+
+
 def apply_result(payload: dict, *, dry_run: bool = False) -> dict:
     stats = {"created": 0, "matched": 0, "intra_batch_matched": 0,
              "rejected": 0, "skipped_reported": 0,
-             "decisions": [], "problems": []}
+             "decisions": [], "problems": [], "tags_dropped": []}
+
+    # Loaded once per payload: the vocabulary gate applies uniformly to every
+    # candidate in the batch. Tags attach only to NEW loops — a matched
+    # candidate's tags are deliberately ignored (retro-tagging existing loops
+    # is the backfill pass's job, not the nightly applier's).
+    vocabulary = _load_vocabulary()
 
     candidates = payload.get("candidates") or []
     skipped = payload.get("skipped") or []
@@ -170,7 +213,8 @@ def apply_result(payload: dict, *, dry_run: bool = False) -> dict:
                     stats["matched"] += 1
                     stats["intra_batch_matched"] += 1
                 elif not dry_run:
-                    loop = V.create_loop(title, occ, date)
+                    tags = _filter_tags(cand.get("tags"), i, vocabulary, stats)
+                    loop = V.create_loop(title, occ, date, tags=tags)
                     by_id[loop.id] = loop
                     note = (cand.get("theme_note") or "").strip()
                     if note:
@@ -278,19 +322,22 @@ def apply_resurfacings() -> dict:
 
 
 def _record_event(kind: str, detail: str) -> None:
-    """Append to the run-event channel the digest reads (same schema as
-    bin/_common.sh record_event)."""
+    """Append to the run-event channel the digest reads (same schema and same
+    locked read-merge-replace as bin/_common.sh record_event — an unlocked
+    write here would race healthcheck's locked writer)."""
     import datetime as _dt
     import os
     path = p("meta") / "run-state.json"
-    from dreamer_common import atomic_write_json, read_json
-    d = read_json(path, default={}) or {}
-    d.setdefault("events", []).append({
-        "at": _dt.datetime.now().isoformat(timespec="seconds"),
-        "job": os.environ.get("JOB", "apply"),
-        "kind": kind, "detail": detail,
-    })
-    atomic_write_json(path, d)
+    from dreamer_common import update_run_state
+
+    def mutate(d: dict) -> None:
+        d.setdefault("events", []).append({
+            "at": _dt.datetime.now().isoformat(timespec="seconds"),
+            "job": os.environ.get("JOB", "apply"),
+            "kind": kind, "detail": detail,
+        })
+
+    update_run_state(path, mutate)
 
 
 def main() -> int:
@@ -311,7 +358,8 @@ def main() -> int:
         stats["resurfacings"] = apply_resurfacings()
 
     log(f"created={stats['created']} matched={stats['matched']} "
-        f"rejected={stats['rejected']} skipped_reported={stats['skipped_reported']}",
+        f"rejected={stats['rejected']} skipped_reported={stats['skipped_reported']} "
+        f"tags_dropped={len(stats['tags_dropped'])}",
         job="apply")
     print(json.dumps(stats, indent=2))
     return 0

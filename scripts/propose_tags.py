@@ -136,6 +136,39 @@ def freeze(tags: list[str]) -> dict:
     return {"path": str(dest), "tags": tags}
 
 
+def filter_against_vocabulary(raw, vocabulary: set[str] | None, context: str,
+                              job: str) -> tuple[list[str], list[str]]:
+    """Enforce CLAUDE.md rule 4 on model-emitted tags.
+
+    Deduplicates order-preserving, keeps only frozen-vocabulary tags, and logs
+    one reason per drop (prefixed with `context`, under `job`). With no frozen
+    vocabulary (None), every tag is dropped: the pre-freeze state writes no
+    tags at all. Returns (valid, dropped_reasons).
+    """
+    tags: list[str] = []
+    for t in (raw or []):
+        t = str(t).strip()
+        if t and t not in tags:
+            tags.append(t)
+    if not tags:
+        return [], []
+    dropped: list[str] = []
+    if vocabulary is None:
+        reason = (f"{context}: dropped tag(s) {tags} — no frozen "
+                  f"vocabulary exists yet (CLAUDE.md rule 4)")
+        dropped.append(reason)
+        log(reason, job=job)
+        return [], dropped
+    valid = [t for t in tags if t in vocabulary]
+    for t in tags:
+        if t not in vocabulary:
+            reason = (f"{context}: tag {t!r} not in the frozen "
+                      f"vocabulary — dropped (CLAUDE.md rule 4)")
+            dropped.append(reason)
+            log(reason, job=job)
+    return valid, dropped
+
+
 def vocabulary() -> set[str] | None:
     data = read_json(p(VOCAB_PATH_KEY) / VOCAB_NAME, default=None)
     if not data:

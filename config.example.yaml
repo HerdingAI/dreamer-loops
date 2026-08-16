@@ -80,6 +80,12 @@ extraction:
   # Size of the pilot slice used for calibration before a full backfill.
   slice_size:      100
 
+# --- tagging --------------------------------------------------------------
+tagging:
+  # One-time backfill drain batch size (bin/tag-backfill.sh); safe to delete
+  # this block (and the script) once the drain reports complete.
+  backfill_per_run: 40
+
 # --- budget ---------------------------------------------------------------
 budget:
   max_turns_nightly:  60
