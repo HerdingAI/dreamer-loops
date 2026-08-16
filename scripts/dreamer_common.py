@@ -7,14 +7,17 @@ are enforced in one place rather than re-implemented per script.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
+import fcntl
 import json
 import os
 import re
 import sys
 import tempfile
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -31,15 +34,8 @@ CFG = load_config()
 
 
 def p(key: str) -> Path:
-    """Resolve a configured path by its key under `paths:`.
-
-    Relative paths resolve against the repo root, so a checkout works wherever
-    it is cloned. Absolute paths are honoured unchanged, which is what you
-    want for a vault kept outside the repo (on a NAS, or in a separate
-    private git repo so your notes never share history with the code).
-    """
-    raw = Path(CFG["paths"][key]).expanduser()
-    return raw if raw.is_absolute() else (ROOT / raw)
+    """Resolve a configured path by its key under `paths:`."""
+    return Path(CFG["paths"][key])
 
 
 # --------------------------------------------------------------------------
@@ -80,6 +76,99 @@ def read_json(path: Path, default: Any = None) -> Any:
             return json.load(fh)
     except (json.JSONDecodeError, OSError):
         return default
+
+
+def read_json_strict(path: Path, default: Any = None) -> Any:
+    """`default` covers a MISSING file only. An existing file that fails to
+    parse raises — a read-merge-replace writer that fell back to `default`
+    here would atomically replace the (recoverable) corrupt file with an
+    empty state and silently wipe every cost, event, and deferral it held."""
+    if not path.exists():
+        return default
+    with path.open(encoding="utf-8") as fh:
+        try:
+            return json.load(fh)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"{path} exists but is not valid JSON ({exc}) — refusing to "
+                f"treat it as empty; fix or move the file") from exc
+
+
+# --------------------------------------------------------------------------
+# Run-state writes (wiki-lock + read-merge-replace)
+# --------------------------------------------------------------------------
+# run-state.json has several writers: healthcheck.py, the bash record_*
+# helpers in bin/_common.sh (via this module), and the watchdog. Atomic
+# replace alone does not serialize read-merge-replace cycles — two writers
+# reading the same snapshot means the later replace drops the earlier write
+# (observed design flaw: ingest-cc.sh's record_* calls racing healthcheck's
+# locked write). Every read-merge-replace therefore holds wiki.lock, the
+# same advisory lock the bash jobs hold for their whole run.
+#
+# Re-entrancy: flock is per open-file-description, so a python child that
+# re-flocks wiki.lock BLOCKS against its own parent shell's held lock (fd 9,
+# bin/_common.sh acquire_lock). acquire_lock therefore exports
+# DREAMER_LOCK_HELD=1, and state_lock skips its own flock when it is set —
+# the parent's held lock already serializes everything run under it.
+
+
+@contextlib.contextmanager
+def state_lock(lockfile: Path, timeout_s: float = 6.0, poll_s: float = 0.2):
+    """Advisory flock on wiki.lock: non-blocking with a short retry, matching
+    scripts/healthcheck.py's vault_lock semantics (which delegates here). See
+    the block comment above for the DREAMER_LOCK_HELD re-entrancy contract.
+    Raises TimeoutError when the lock cannot be had inside `timeout_s`."""
+    if os.environ.get("DREAMER_LOCK_HELD"):
+        yield  # the calling job already holds wiki.lock on fd 9
+        return
+    lockfile.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(lockfile, "a")
+    try:
+        deadline = time.monotonic() + timeout_s
+        while True:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"could not acquire {lockfile} within {timeout_s}s "
+                        f"(a job is running)")
+                time.sleep(poll_s)
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        fh.close()
+
+
+def append_event_deduped(state: dict, event: dict) -> bool:
+    """Append `event` to state["events"] unless an identical
+    (job, kind, detail) event is already pending. The digest that drains
+    events is weekly while some writers fire nightly or per-entry, so an
+    undeduped repeat failure stacks identical lines into one digest — the
+    same contract healthcheck.write_health and the watchdog apply. Returns
+    True if the event was actually appended."""
+    seen = {(e.get("job"), e.get("kind"), e.get("detail"))
+            for e in state.get("events") or []}
+    key = (event.get("job"), event.get("kind"), event.get("detail"))
+    if key in seen:
+        return False
+    state.setdefault("events", []).append(event)
+    return True
+
+
+def update_run_state(state_path: Path, mutate: Callable[[dict], Any]) -> dict:
+    """Locked read-merge-atomic-replace on a run-state style JSON dict.
+
+    The state is read INSIDE the locked section so a write that landed a
+    moment earlier is merged, never clobbered. An existing-but-unparseable
+    file raises (read_json_strict) rather than being wiped to {}."""
+    with state_lock(state_path.parent / "wiki.lock"):
+        state = read_json_strict(state_path, default={}) or {}
+        mutate(state)
+        atomic_write_json(state_path, state)
+    return state
 
 
 # --------------------------------------------------------------------------
@@ -220,6 +309,17 @@ def as_date(value: Any) -> _dt.date | None:
         return _dt.datetime.fromisoformat(s.replace("Z", "+00:00")).date()
     except ValueError:
         return None
+
+
+def hours_since(iso_ts) -> float | None:
+    """Float hours elapsed since an ISO timestamp, or None when the value is
+    missing or unparseable. Callers map None onto their own fallback (treat
+    the record as stale, rescue nothing, ...) — this helper never guesses."""
+    try:
+        then = _dt.datetime.fromisoformat(iso_ts)
+    except (TypeError, ValueError):
+        return None
+    return (_dt.datetime.now() - then).total_seconds() / 3600.0
 
 
 def go_live_date() -> _dt.date | None:
