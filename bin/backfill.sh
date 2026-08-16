@@ -66,5 +66,13 @@ print(f"quarantined {len(batch)} transcript(s) -> {path}")' || log "WARN could n
   commit "backfill batch $i: $(jq -r '"created=\(.created) matched=\(.matched)"' "$ROOT/logs/.applied-$JOB.json" 2>/dev/null || echo done)"
 done
 
+# Fold the backfill's matched occurrences into their loops' living threads
+# (CLAUDE.md rule 15). After the batch loop, not inside it: the queue is
+# durable, so a deferral mid-backfill simply leaves the folds for the next
+# invocation (or the nightly job) to drain.
+drain_fold_pending
+regen_catalog
+commit "backfill $(TODAY): thread folds applied"
+
 reindex
 log "done"

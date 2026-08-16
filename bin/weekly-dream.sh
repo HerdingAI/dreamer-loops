@@ -4,6 +4,18 @@
 # the week (Principle 9 requires checkpointing; v2.0 had none here).
 JOB=weekly-dream
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+
+# Refresh the index and re-evaluate health BEFORE the leg_blocked gate below,
+# so the gate judges post-refresh state: leg_blocked reads the record the
+# LAST healthcheck wrote, and index-fresh's rescue window is fed by
+# last_reindex — without this ordering a stale-index block could only clear
+# on some other job's schedule, making the block self-sustaining. Runs before
+# acquire_lock because healthcheck takes the same wiki.lock for its write
+# (see nightly-extract.sh). A second reindex still runs at the end of the
+# job — that one indexes the conclusion pages this run just wrote.
+reindex || log "WARN pre-gate reindex failed — the health gate judges stale state"
+run_healthcheck "before research gate"
+
 acquire_lock
 log "start"
 
@@ -15,6 +27,21 @@ RECOVERED=$("$PY" "$ROOT/scripts/vault.py" recover | wc -l)
 if [[ "$RECOVERED" -gt 0 ]]; then
   log "recovered $RECOVERED stranded loop(s)"
   record_event "recovery" "$RECOVERED loop(s) left in 'researching' by a prior deferral were reset to open and re-selected first"
+fi
+
+# Health gate: a blocking assertion failure (scripts/healthcheck.py) parks the
+# research leg until health clears. Same honest-deferral contract as the cost
+# skip below — the work is not lost, and the event says so in the next digest.
+if leg_blocked research; then
+  log "healthcheck has blocked the research leg — deferring cleanly"
+  record_event "degraded" "weekly-dream deferred: healthcheck has blocked the 'research' leg (see the health record in run-state.json); research resumes once health clears"
+  # The block must reach the owner: build the digest before exiting, exactly
+  # like the cost-skip path below — a blocked leg that also kills its own
+  # report would be invisible until health happened to clear on its own.
+  "$PY" "$ROOT/scripts/digest.py" build --quiet-reason \
+      "Research deferred: healthcheck has blocked the 'research' leg (see the health record in run-state.json)." >/dev/null
+  regen_catalog; commit "weekly-dream $(TODAY): research blocked (healthcheck)"
+  exit 0
 fi
 
 if should_skip_research; then
@@ -115,8 +142,17 @@ if [[ "${JERR:-0}" -gt 0 ]]; then
   record_event "merge" "the Stage-B judge failed on $JERR candidate pair(s) this week; those fell back to token overlap, so near-duplicates with little shared wording may have been missed"
 fi
 
-# 4. Lint, digest, catalog.
-"$PY" "$ROOT/scripts/vault.py" lint || log "lint reported problems (see above)"
+# 4. Lint, digest, catalog. Lint output used to die in the log; a vault that
+#    fails its own invariants is event-channel material, not log-only.
+LINT_OUT=$("$PY" "$ROOT/scripts/vault.py" lint 2>&1)
+LINT_RC=$?
+printf '%s\n' "$LINT_OUT"
+if [[ $LINT_RC -ne 0 ]]; then
+  log "lint reported problems (see above)"
+  # vault.py lint ends with "N problem(s)" — parse the count for the event.
+  NPROB=$(printf '%s\n' "$LINT_OUT" | sed -n 's/^\([0-9][0-9]*\) problem(s)$/\1/p' | tail -1)
+  record_event "degraded" "lint reported ${NPROB:-an unknown number of} problem(s) — a vault invariant is violated; see the weekly-dream log for the LINT: lines"
+fi
 "$PY" "$ROOT/scripts/digest.py" build >/dev/null && log "digest written"
 reindex
 regen_catalog

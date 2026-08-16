@@ -22,14 +22,16 @@ log "=== post-backfill acceptance sweep ==="
 
 # 1. Re-embed. Retrieval quality is meaningless against a stale index, and a
 #    silent staleness here would make every downstream number a lie.
-reindex; gate "reindex (vault/transcripts/conclusions)" $?
+reindex; gate "reindex (config qmd.collections, update + embed)" $?
 
 # 2. Catalog — the file every matching run reads first (CLAUDE.md rule 11).
 regen_catalog; gate "catalog regenerated" $?
 
 # 3. Structural integrity of the vault.
 "$PY" "$ROOT/scripts/vault.py" lint | tee "$LOGS/.verify-lint.txt"
-grep -q "0 problems" "$LOGS/.verify-lint.txt"
+# The linter prints "0 problem(s)", not "0 problems" — matching the plural
+# form meant this gate could never pass, and reported FAIL on a clean vault.
+grep -q "^0 problem" "$LOGS/.verify-lint.txt"
 gate "vault lint clean" $?
 
 # 4. Unit tests.

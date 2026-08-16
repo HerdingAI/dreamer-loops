@@ -23,6 +23,12 @@ BATCHES="${1:-${BACKFILL_BATCHES:-8}}"
 
 log "=== night cycle start (backfill up to $BATCHES batch(es), then dream) ==="
 
+# Health check before any leg runs. Runs here, OUTSIDE the vault lock — the
+# legs each take wiki.lock themselves and healthcheck needs the same lock for
+# its run-state write. Non-zero means the health record could not be written:
+# degraded, logged, never a reason to abort the cycle.
+run_healthcheck
+
 # Leg 1 — backfill. Deliberately not fatal: a backfill that defers on the
 # usage window is the normal, designed outcome, and the dream leg should still
 # get its turn on whatever window is left.
@@ -39,6 +45,11 @@ fi
 # researching: nothing at or above recurrence_min means a cheap quiet-week
 # digest and exit, so running it every cycle costs little when the queue of
 # eligible loops is empty.
+# Re-check health right before the dream leg: the backfill leg above mutates
+# the corpus for hours, so the record taken at cycle start may describe a
+# world that no longer exists.
+run_healthcheck "before dream leg"
+
 log "dream: starting"
 "$ROOT/bin/weekly-dream.sh" || log "dream leg exited non-zero"
 

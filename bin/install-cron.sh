@@ -1,15 +1,33 @@
 #!/usr/bin/env bash
-# Install the three scheduled jobs (§6.9). Idempotent.
+# Install the scheduled jobs (§6.9). Idempotent.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Resolve node's bin dir the same way bin/_common.sh does: glob over installed
+# nvm versions and take the first one that carries qmd. Never pin a version —
+# a hardcoded path silently breaks the wisdom route on the next node upgrade.
+# If nothing matches (node/qmd installed another way), the PATH line below is
+# emitted without it: put the directory holding node/qmd on cron's PATH
+# yourself by editing the installed block.
+NODE_BIN=""
+for _nodebin in "$HOME"/.nvm/versions/node/*/bin; do
+  if [ -x "$_nodebin/qmd" ]; then NODE_BIN="$_nodebin"; break; fi
+done
+unset _nodebin
+
 read -r -d '' BLOCK <<EOF || true
 # --- dreamer (managed by bin/install-cron.sh) ---
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.nvm/versions/node/v24.14.0/bin
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${NODE_BIN:+:$NODE_BIN}
 # Night cycle — backfill then dream, every 3 hours on the hour 20:00-05:00
 # (owner decision 2026-08-02). Both legs live in one wrapper because they share
 # the vault lock; co-scheduled, the second would always lose and skip.
 0 20,23,2,5 * * * flock -n /tmp/dreamer-night.lock $ROOT/bin/night-cycle.sh >> $ROOT/logs/night.log 2>&1
+
+# Claude Code session ingestion, ahead of extraction so anything it writes is
+# in the queue the 19:00 run selects from. Takes no vault lock (append-only
+# into vault/sources via atomic writes), but is scheduled clear of the others
+# anyway so its summariser calls do not contend for the usage window.
+30 18 * * * flock -n /tmp/dreamer-ingest-cc.lock $ROOT/bin/ingest-cc.sh >> $ROOT/logs/ingest-cc.log 2>&1
 
 # Inbox extraction, ahead of the night window so it never contends with it.
 0 19 * * *  flock -n /tmp/dreamer-nightly.lock $ROOT/bin/nightly-extract.sh >> $ROOT/logs/nightly.log 2>&1
@@ -26,6 +44,13 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/.nvm/ver
 # vault. For anything sooner, run bin/dashboard.sh -- it regenerates on demand.
 # (No backticks in this heredoc: it is unquoted, so they would run as commands.)
 0 6 * * 0 $ROOT/scripts/dashboard.py >> $ROOT/logs/dashboard.log 2>&1
+
+# Health watchdog, hourly and independent of the night pipeline. It ONLY
+# compares health.checked_at against health.checked_max_age_hours — no
+# assertion registry, no model calls — and when stale it appends a degraded
+# event AND writes to logs/watchdog.log, a channel outside the pipeline it
+# watches. Offset to :12 so it never coincides with the on-the-hour jobs.
+12 * * * * $ROOT/scripts/healthcheck.py --watchdog >> $ROOT/logs/watchdog.log 2>&1
 # --- end dreamer ---
 EOF
 
@@ -37,5 +62,10 @@ rm -f "$TMP"
 echo "installed:"
 crontab -l | sed -n '/# --- dreamer/,/# --- end dreamer ---/p'
 echo
-echo "NOTE: cron needs explicit PATH for node/qmd — set above. Jobs are also"
-echo "guarded by flock, so an overrun never overlaps its successor."
+if [ -n "$NODE_BIN" ]; then
+  echo "NOTE: cron needs explicit PATH for node/qmd — resolved to $NODE_BIN."
+else
+  echo "NOTE: no nvm node install with qmd was found — edit the PATH line in"
+  echo "      the installed block to include the directory holding node/qmd."
+fi
+echo "Jobs are guarded by flock, so an overrun never overlaps its successor."

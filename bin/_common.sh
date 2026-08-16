@@ -41,14 +41,44 @@ acquire_lock() {
     exit 0
   fi
   echo "$JOB:$$:$(date -Is)" >&9 || true
+  # Tell child processes the lock is already held. flock is per
+  # open-file-description, so a record_* python child re-flocking wiki.lock
+  # would block against THIS shell's held fd 9 — with this set,
+  # dreamer_common.state_lock skips its own flock; the parent's held lock
+  # already serializes every write made under it.
+  export DREAMER_LOCK_HELD=1
+}
+
+# --- health spine ----------------------------------------------------------
+# Runs scripts/healthcheck.py OUTSIDE the vault lock (flock is per
+# open-file-description, so a child process can never re-acquire the lock this
+# shell already holds — call it BEFORE acquire_lock). Non-zero means the
+# health record could not be written: degraded, logged, never fatal.
+# run_healthcheck [detail] — `detail` replaces the default parenthetical in
+# the log line, e.g. "before dream leg".
+run_healthcheck() {
+  local detail="${1:-(health record may be stale)}"
+  "$PY" "$ROOT/scripts/healthcheck.py" \
+    || log "healthcheck exited non-zero $detail — continuing"
 }
 
 # --- claude -p wrapper ----------------------------------------------------
 # A usage-limit exit is a NORMAL outcome that defers work to the next run
 # (Principle 9). It must be logged honestly and must not look like success.
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
+# run_claude <prompt_file> <max_turns> <out_file> [restricted]
+#
+# The optional 4th argument selects the tool surface:
+#   (absent)     — the research surface: qmd + web, acceptEdits. For jobs
+#                  whose contract permits egress (CLAUDE.md rules 5/12).
+#   restricted   — output-only: headless deny-by-default (no acceptEdits, no
+#                  allowlist) PLUS an explicit disallow list covering shell,
+#                  edit, web, the read/search tools and both MCP servers, and
+#                  max-turns capped at 2. For jobs whose prompt inlines
+#                  private vault content that must never leak into a query
+#                  (rule 12) — tag-backfill and the thread-fold drain.
 run_claude() {
-  local prompt_file="$1" max_turns="$2" out_file="$3"
+  local prompt_file="$1" max_turns="$2" out_file="$3" tool_mode="${4:-full}"
   local raw="$out_file.raw.json"
 
   if [[ "${DREAMER_FAKE_CLAUDE:-}" != "" ]]; then
@@ -77,12 +107,34 @@ run_claude() {
   # single line changing in this repo.
   local model
   model=$("$PY" -c "import yaml;print(yaml.safe_load(open('$ROOT/config.yaml'))['budget'].get('model') or '')" 2>/dev/null || true)
+  local -a perm_args
+  if [[ "$tool_mode" == "restricted" ]]; then
+    # Output-only. No --permission-mode acceptEdits (so no edit permission),
+    # no --allowedTools (so nothing is pre-approved and headless denies by
+    # default), PLUS an explicit disallow list so the contract still holds if
+    # a future CLI default changes underneath us. Read/Glob/Grep/LS are
+    # denied too: a restricted prompt inlines everything it may see, and a
+    # read tool would let it browse private vault content the caller never
+    # inlined. Both MCP servers (qmd, dreamer) are shut for the same reason.
+    perm_args=(--disallowedTools "Bash" "Edit" "Write" "NotebookEdit" "Task"
+               "WebSearch" "WebFetch" "Read" "Glob" "Grep" "LS"
+               "mcp__qmd" "mcp__dreamer")
+    # Restricted jobs are contractually single-shot: the input is inlined and
+    # the reply is one JSON object. Tool attempts still happen (the model may
+    # try a denied Read and needs a turn to recover from the rejection), and a
+    # 2-turn cap turned that recoverable nudge into is_error/stop_reason=
+    # tool_use (observed live, 2026-08-16). The security property is the deny
+    # list, not the cap — keep a small recovery margin.
+    if [[ "$max_turns" -gt 4 ]]; then max_turns=4; fi
+  else
+    perm_args=(--permission-mode acceptEdits
+               --allowedTools "Bash(qmd:*)" "mcp__qmd" "WebSearch" "WebFetch")
+  fi
   "$CLAUDE_BIN" -p "$(cat "$prompt_file")" \
       --output-format json \
       ${model:+--model "$model"} \
       --max-turns "$max_turns" \
-      --permission-mode acceptEdits \
-      --allowedTools "Bash(qmd:*)" "mcp__qmd" "WebSearch" "WebFetch" \
+      "${perm_args[@]}" \
       > "$raw" 2>>"$LOGS/$JOB.log"
   local code=$?
   set -e
@@ -120,43 +172,71 @@ PYEOF
 # Run-level events surface in the next digest. Without this channel a deferred
 # night or a recovered loop is written to run-state.json and silently forgotten,
 # which is the failure the honest-deferral rule exists to prevent.
+#
+# WRITE SAFETY (all record_* helpers + clear_skip_research): every write is a
+# read-merge-atomic-replace under wiki.lock via dreamer_common.update_run_state
+# — an unlocked in-place json.dump raced healthcheck's locked writer (ingest-cc
+# holds no job lock), and whichever wrote last silently dropped the other's
+# record. Re-entrancy: jobs call these while HOLDING wiki.lock on fd 9, and
+# flock is per open-file-description, so the child must not re-flock —
+# acquire_lock exports DREAMER_LOCK_HELD=1 and state_lock skips its own flock
+# under it. On lock contention (another process held it past the short retry)
+# or unparseable state the write is refused loudly: WARN in the log, nothing
+# wiped, job continues (`|| log` keeps set -e contexts alive).
 record_event() {
-  "$PY" - "$META/run-state.json" "$1" "$2" <<'PYEOF'
-import json,sys,os,datetime
-path,kind,detail=sys.argv[1],sys.argv[2],sys.argv[3]
-d=json.load(open(path)) if os.path.exists(path) else {}
-d.setdefault("events",[]).append(
-    {"at":datetime.datetime.now().isoformat(timespec="seconds"),
-     "job":os.environ.get("JOB","?"),"kind":kind,"detail":detail})
-json.dump(d,open(path,"w"),indent=2)
+  # Central dedup (dreamer_common.append_event_deduped): an identical
+  # (job, kind, detail) event already pending is not appended again. The
+  # digest that drains events is weekly while some callers fire per entry
+  # per run (the fold drain's skip events were the live case), so an
+  # undeduped repeat stacks identical lines into one digest — same contract
+  # as healthcheck.write_health and the watchdog.
+  "$PY" - "$META/run-state.json" "$1" "$2" <<'PYEOF' \
+    || log "WARN record_event failed — event NOT recorded (see stderr above)"
+import datetime, os, sys
+from pathlib import Path
+sys.path.insert(0, os.path.join(os.environ["ROOT"], "scripts"))
+from dreamer_common import append_event_deduped, update_run_state
+path, kind, detail = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+event = {"at": datetime.datetime.now().isoformat(timespec="seconds"),
+         "job": os.environ.get("JOB", "?"), "kind": kind, "detail": detail}
+update_run_state(path, lambda d: append_event_deduped(d, event))
 PYEOF
 }
 
 record_deferral() {
-  "$PY" - "$META/run-state.json" "$1" <<'PYEOF'
-import json,sys,datetime,os
-path,code=sys.argv[1],sys.argv[2]
-d=json.load(open(path)) if os.path.exists(path) else {}
-d.setdefault("deferrals",[]).append(
-    {"at":datetime.datetime.now().isoformat(timespec="seconds"),
-     "exit_code":int(code),"job":os.environ.get("JOB","?")})
-json.dump(d,open(path,"w"),indent=2)
+  "$PY" - "$META/run-state.json" "$1" <<'PYEOF' \
+    || log "WARN record_deferral failed — deferral NOT recorded (see stderr above)"
+import datetime, os, sys
+from pathlib import Path
+sys.path.insert(0, os.path.join(os.environ["ROOT"], "scripts"))
+from dreamer_common import update_run_state
+path, code = Path(sys.argv[1]), sys.argv[2]
+def mutate(d):
+    d.setdefault("deferrals", []).append(
+        {"at": datetime.datetime.now().isoformat(timespec="seconds"),
+         "exit_code": int(code), "job": os.environ.get("JOB", "?")})
+update_run_state(path, mutate)
 PYEOF
 }
 
 record_cost() {
   [[ -f "$1" ]] || return 0
-  "$PY" - "$META/run-state.json" "$1" "$ROOT/config.yaml" <<'PYEOF'
-import json,sys,os,datetime,yaml
-state,costfile,cfgfile=sys.argv[1],sys.argv[2],sys.argv[3]
-cost=float(open(costfile).read().strip() or 0)
-cfg=yaml.safe_load(open(cfgfile))
-raw_ceiling=cfg["budget"].get("cost_ceiling_per_run")
-ceiling=None if raw_ceiling in (None,"","null","unlimited") else float(raw_ceiling)
-d=json.load(open(state)) if os.path.exists(state) else {}
-d.setdefault("costs",[]).append(
-    {"at":datetime.datetime.now().isoformat(timespec="seconds"),
-     "job":os.environ.get("JOB","?"),"cost":round(cost,4)})
+  "$PY" - "$META/run-state.json" "$1" "$ROOT/config.yaml" <<'PYEOF' \
+    || log "WARN record_cost failed — cost NOT recorded (see stderr above)"
+import datetime, os, sys
+from pathlib import Path
+import yaml
+sys.path.insert(0, os.path.join(os.environ["ROOT"], "scripts"))
+from dreamer_common import update_run_state
+state, costfile, cfgfile = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+cost = float(open(costfile).read().strip() or 0)
+cfg = yaml.safe_load(open(cfgfile))
+raw_ceiling = cfg["budget"].get("cost_ceiling_per_run")
+ceiling = None if raw_ceiling in (None, "", "null", "unlimited") else float(raw_ceiling)
+def mutate(d):
+    d.setdefault("costs", []).append(
+        {"at": datetime.datetime.now().isoformat(timespec="seconds"),
+         "job": os.environ.get("JOB", "?"), "cost": round(cost, 4)})
 # Cost is ALWAYS recorded — the digest's run stats and any spend question you
 # ever ask depend on it. Only the gate is optional.
 #
@@ -171,17 +251,18 @@ d.setdefault("costs",[]).append(
 #
 # Set a number here to restore the gate — meaningful if jobs ever move to API
 # keys (spec P2), where the figure becomes real money.
-if ceiling is not None:
-    # There is no mid-run abort under `claude -p` (cost is reported after the
-    # run), so exceeding the ceiling makes the NEXT run skip research instead.
-    # LATCH, do not assign. weekly-dream calls run_claude once per loop, so a
-    # plain assignment lets the last cheap loop clear a breach the expensive
-    # ones set. Observed live: 4 breaches, final state False. Cleared only by
-    # clear_skip_research() once the skip has actually been honored.
-    d["skip_research_next_run"] = bool(d.get("skip_research_next_run")) or (cost > ceiling)
-    if cost > ceiling:
-        print(f"[cost] run cost {cost} exceeded ceiling {ceiling}: next run will skip research")
-json.dump(d,open(state,"w"),indent=2)
+    if ceiling is not None:
+        # There is no mid-run abort under `claude -p` (cost is reported after
+        # the run), so exceeding the ceiling makes the NEXT run skip research
+        # instead. LATCH, do not assign. weekly-dream calls run_claude once per
+        # loop, so a plain assignment lets the last cheap loop clear a breach
+        # the expensive ones set. Observed live: 4 breaches, final state False.
+        # Cleared only by clear_skip_research() once the skip has actually been
+        # honored.
+        d["skip_research_next_run"] = bool(d.get("skip_research_next_run")) or (cost > ceiling)
+        if cost > ceiling:
+            print(f"[cost] run cost {cost} exceeded ceiling {ceiling}: next run will skip research")
+update_run_state(state, mutate)
 PYEOF
 }
 
@@ -194,14 +275,125 @@ sys.exit(0 if d.get("skip_research_next_run") else 1)
 PYEOF
 }
 
-clear_skip_research() {
-  "$PY" - "$META/run-state.json" <<'PYEOF'
+# True (exit 0) when scripts/healthcheck.py has blocked the named leg.
+# Jobs consult this next to should_skip_research and defer cleanly — a blocked
+# leg is a health verdict, not a crash.
+leg_blocked() {
+  "$PY" - "$META/run-state.json" "$1" <<'PYEOF'
 import json,os,sys
-p=sys.argv[1]
+p,leg=sys.argv[1],sys.argv[2]
 d=json.load(open(p)) if os.path.exists(p) else {}
-d["skip_research_next_run"]=False
-json.dump(d,open(p,"w"),indent=2)
+sys.exit(0 if leg in ((d.get("health") or {}).get("blocked_legs") or []) else 1)
 PYEOF
+}
+
+clear_skip_research() {
+  "$PY" - "$META/run-state.json" <<'PYEOF' \
+    || log "WARN clear_skip_research failed — flag NOT cleared (see stderr above)"
+import os, sys
+from pathlib import Path
+sys.path.insert(0, os.path.join(os.environ["ROOT"], "scripts"))
+from dreamer_common import update_run_state
+def mutate(d):
+    d["skip_research_next_run"] = False
+update_run_state(Path(sys.argv[1]), mutate)
+PYEOF
+}
+
+# --- living thread: fold-pending drain (CLAUDE.md rule 15) ----------------
+# One RESTRICTED (output-only) LLM fold per queued {loop, occurrence}.
+# scripts/fold_pending.py selects the batch without consuming it and
+# scripts/apply_thread.py removes an entry ONLY after a successful page
+# write, so a deferral or the fold_per_run cap leaves the remainder queued
+# for the next run (rule 9). Never fatal: a broken fold degrades the thread,
+# not the night.
+# drain_fold_pending [limit] — the optional limit overrides config
+# thread.fold_per_run; thread-backfill passes thread.backfill_per_run so the
+# one-time drain gets its own cap without touching the nightly one.
+drain_fold_pending() {
+  local limit="${1:-}" maxt
+  if [[ -z "$limit" ]]; then
+    limit=$("$PY" -c "import yaml;print((yaml.safe_load(open('$ROOT/config.yaml')).get('thread') or {}).get('fold_per_run',20))" 2>/dev/null || echo 20)
+  fi
+  maxt=$("$PY" -c "import yaml;print(yaml.safe_load(open('$ROOT/config.yaml'))['budget'].get('max_turns_thread_fold',8))" 2>/dev/null || echo 8)
+  local batch="$LOGS/.fold-batch-$JOB.json"
+  if ! "$PY" "$ROOT/scripts/fold_pending.py" batch --limit "$limit" --out "$batch" 2>>"$LOGS/$JOB.log"; then
+    log "WARN fold-pending batch selection failed — folds skipped this run"
+    record_event "degraded" "thread-fold: queue read failed; folds skipped this run"
+    return 0
+  fi
+  # Guard verdicts surface on the digest's event channel: an unsorted
+  # occurrence list or a dead link is a page defect, not a quiet no-op.
+  # record_event dedups identical (job, kind, detail) pending events
+  # centrally, so a skip that repeats every drain lands in the digest once.
+  while IFS=$'\t' read -r skip_reason; do
+    [[ -n "$skip_reason" ]] && record_event "degraded" "thread-fold: entry skipped — $skip_reason"
+  done < <("$PY" -c "import json,sys
+for s in json.load(open(sys.argv[1])).get('skipped',[]): print(s['reason'])" "$batch")
+  local n
+  n=$("$PY" -c "import json,sys;print(len(json.load(open(sys.argv[1]))['ready']))" "$batch")
+  if [[ "$n" -eq 0 ]]; then rm -f "$batch"; return 0; fi
+  log "thread-fold: $n fold(s) to apply (cap $limit)"
+  # One parse of the batch, one line per ready entry, in queue order. Fields
+  # are joined on the unit separator (0x1f): loop ids, wikilinks and dates
+  # can never contain it, and the transcript field is a repo file path — but
+  # a path could in principle hold a tab, so a tab delimiter is not safe.
+  # fd 8, not stdin: the loop body runs claude and python, and a child that
+  # reads stdin would otherwise swallow the remaining entries. (fd 9 is the
+  # vault lock.)
+  # Per-run failed-loop set (mirrors fold_pending.batch()'s blocked-set): a
+  # loop whose entry failed this run must not have a LATER occurrence folded
+  # in the same run — that would write the trajectory out of chronology.
+  # Skipped entries stay queued, no attempt increment beyond the failed one;
+  # the one degraded event per newly-failed loop dedups centrally on repeats.
+  local -A FAILED_LOOPS=()
+  local F_LOOP F_OCC F_DATE F_PATH verdict
+  while IFS=$'\x1f' read -r -u 8 F_LOOP F_OCC F_DATE F_PATH; do
+    if [[ -n "${FAILED_LOOPS[$F_LOOP]:-}" ]]; then
+      log "thread-fold: skipping later $F_LOOP entry this run (an earlier one failed — folds apply oldest-first)"
+      continue
+    fi
+    # Count the try BEFORE spending it (FIX: unbounded retries). Past
+    # thread.fold_max_attempts fold_pending.py quarantines the entry itself
+    # (event emitted there) and this run must not fold past the hole.
+    verdict=$("$PY" "$ROOT/scripts/fold_pending.py" attempt --loop "$F_LOOP" \
+              --occurrence "$F_OCC" 2>>"$LOGS/$JOB.log") \
+      || { verdict='{}'
+           log "WARN attempt stamp failed for $F_LOOP (see log) — folding anyway, retry cap not advanced"; }
+    if [[ "$verdict" == *'"quarantined": true'* ]]; then
+      FAILED_LOOPS[$F_LOOP]=1
+      log "thread-fold: $F_OCC quarantined (attempt cap) — later $F_LOOP entries stay queued"
+      continue
+    fi
+    if ! "$PY" "$ROOT/scripts/fold_pending.py" prompt --loop "$F_LOOP" \
+          --occurrence "$F_OCC" --transcript "$F_PATH" \
+          --out "$LOGS/.prompt-fold.md" 2>>"$LOGS/$JOB.log"; then
+      record_event "degraded" "thread-fold: prompt build failed for $F_LOOP — entry left queued"
+      FAILED_LOOPS[$F_LOOP]=1
+      continue
+    fi
+    if ! run_claude "$LOGS/.prompt-fold.md" "$maxt" "$LOGS/.result-fold.json" restricted; then
+      log "thread-fold deferred at $F_LOOP — remaining folds stay queued"
+      break
+    fi
+    if "$PY" "$ROOT/scripts/apply_thread.py" --loop "$F_LOOP" \
+          --occurrence "$F_OCC" --date "$F_DATE" \
+          --input "$LOGS/.result-fold.json" >>"$LOGS/$JOB.log" 2>&1; then
+      log "thread-fold: folded $F_OCC into $F_LOOP"
+    else
+      # Per-loop artifact (mirrors ingest-cc's per-session refusal keep): a
+      # refusal is a claim about the reply, and a later fold overwriting the
+      # shared scratch file would make that claim unfalsifiable.
+      mv -f "$LOGS/.result-fold.json" \
+            "$LOGS/.result-fold-refused-$F_LOOP.json" 2>/dev/null || true
+      record_event "degraded" "thread-fold: apply refused the fold for $F_LOOP (entry left queued; reply kept at logs/.result-fold-refused-$F_LOOP.json)"
+      FAILED_LOOPS[$F_LOOP]=1
+    fi
+  done 8< <("$PY" -c "import json,sys
+for e in json.load(open(sys.argv[1]))['ready']:
+    print(e['loop_id'], e['occurrence'], e['date'], e['transcript'], sep=chr(0x1f))" "$batch")
+  rm -f "$batch"
+  return 0
 }
 
 # --- finalisation ---------------------------------------------------------
@@ -215,17 +407,64 @@ reindex() {
     record_event "degraded" "qmd unreachable: index not refreshed and the wisdom route is unavailable — conclusions this run are web-only"
     return 1
   fi
-  local rc=0
-  for c in vault transcripts conclusions; do
+  # The collection list comes from config (qmd.collections) — the same list
+  # the healthcheck's collections-covered assertion holds this function to.
+  # Hardcoding it here is how `wisdom` silently fell out of the reindex.
+  local collections
+  collections=$("$PY" -c "import yaml;print(' '.join(yaml.safe_load(open('$ROOT/config.yaml')).get('qmd',{}).get('collections') or []))" 2>/dev/null || true)
+  if [[ -z "$collections" ]]; then
+    log "ERROR: config.yaml qmd.collections is missing or empty — nothing to reindex"
+    record_event "degraded" "reindex: config.yaml qmd.collections missing or empty — index not refreshed"
+    return 1
+  fi
+  local rc=0 c
+  local -a updated=()
+  for c in $collections; do
     if (cd "$ROOT" && qmd update -c "$c" 2>&1); then
       log "qmd re-index ok: $c"
+      updated+=("$c")
+      # Embed inline so vectors track the index they serve. Embed failure is
+      # degraded, never fatal: lexical search stays fresh even when embedding
+      # fails, and the remaining collections must still be processed.
+      if (cd "$ROOT" && qmd embed -c "$c" 2>&1); then
+        log "qmd embed ok: $c"
+      else
+        log "ERROR: qmd embed -c $c FAILED (see log)"
+        record_event "degraded" "qmd embed failed for collection '$c' — vector search may answer from stale embeddings (lexical index is fresh)"
+      fi
     else
       log "ERROR: qmd update -c $c FAILED (see log)"
       record_event "degraded" "qmd re-index failed for collection '$c' — retrieval may be stale"
       rc=1
     fi
   done
+  # Coverage record for healthcheck's collections-covered and index-fresh
+  # assertions. Only collections whose `qmd update` succeeded are listed —
+  # written even when empty, so a fully failed reindex reads as no coverage
+  # rather than inheriting last night's record.
+  record_reindex ${updated[@]+"${updated[@]}"}
   return $rc
+}
+
+# Writes {"collections": [...], "at": "<iso>"} under `last_reindex` in
+# run-state.json — locked read-merge-atomic-replace like the record_* helpers
+# above (same race, same DREAMER_LOCK_HELD re-entrancy contract).
+record_reindex() {
+  "$PY" - "$META/run-state.json" "$@" <<'PYEOF' \
+    || log "WARN record_reindex failed — coverage NOT recorded (see stderr above)"
+import datetime, os, sys
+from pathlib import Path
+sys.path.insert(0, os.path.join(os.environ["ROOT"], "scripts"))
+from dreamer_common import update_run_state
+path = Path(sys.argv[1])
+collections = sys.argv[2:]
+def mutate(d):
+    d["last_reindex"] = {
+        "collections": collections,
+        "at": datetime.datetime.now().isoformat(timespec="seconds"),
+    }
+update_run_state(path, mutate)
+PYEOF
 }
 
 regen_catalog() { "$PY" "$ROOT/scripts/vault.py" catalog >/dev/null && log "catalog regenerated"; }
