@@ -49,3 +49,5 @@ __pycache__/
 venv/
 .DS_Store
 .claude/settings.local.json
+# Generated per-run; carries loop titles once the vault is in use.
+vault/loops/_catalog.md
