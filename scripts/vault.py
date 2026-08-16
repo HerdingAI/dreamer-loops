@@ -720,13 +720,25 @@ def _norm(ref: str) -> str:
 
 
 def _resolve_wikilink(ref: str) -> Path | None:
+    """Resolve a wikilink to a file under the vault, refusing traversal.
+
+    `ref` may originate from LLM output (extraction's `transcript` field,
+    a fold occurrence) rather than deterministic code, so a `..` segment
+    or an absolute path must never resolve outside `p("vault")` — that
+    would turn a single model-invented path into an arbitrary-file read
+    whose content then gets embedded in a later prompt (fold_pending.py).
+    """
     rel = _norm(ref)
-    if not rel:
+    if not rel or ".." in Path(rel).parts:
         return None
-    base = p("vault")
+    base = p("vault").resolve()
     for cand in (base / f"{rel}.md", base / rel):
-        if cand.exists():
-            return cand
+        try:
+            resolved = cand.resolve()
+        except OSError:
+            continue
+        if resolved.exists() and resolved.is_relative_to(base):
+            return resolved
     # Bare name: search the vault.
     name = Path(rel).name
     for cand in base.rglob(f"{name}.md"):

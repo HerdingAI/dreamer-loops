@@ -563,7 +563,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--root", type=Path,
                     default=Path(CFG.get("corpora", {}).get(
                         "claude_code_sessions",
-                        Path.home() / ".claude" / "projects")),
+                        str(Path.home() / ".claude" / "projects"))
+                    ).expanduser(),
                     help="Claude Code projects directory")
     ap.add_argument("--out", type=Path, default=None,
                     help="where payloads are written (default: logs/)")

@@ -34,8 +34,13 @@ CFG = load_config()
 
 
 def p(key: str) -> Path:
-    """Resolve a configured path by its key under `paths:`."""
-    return Path(CFG["paths"][key])
+    """Resolve a configured path by its key under `paths:`.
+
+    Relative paths are anchored to the repo root (not the caller's cwd —
+    cron invokes every job with cwd=$HOME) and `~` is expanded.
+    """
+    raw = Path(CFG["paths"][key]).expanduser()
+    return raw if raw.is_absolute() else (ROOT / raw)
 
 
 # --------------------------------------------------------------------------

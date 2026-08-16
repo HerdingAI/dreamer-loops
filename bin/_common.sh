@@ -74,7 +74,7 @@ CLAUDE_BIN="${CLAUDE_BIN:-claude}"
 #   restricted   — output-only: headless deny-by-default (no acceptEdits, no
 #                  allowlist) PLUS an explicit disallow list covering shell,
 #                  edit, web, the read/search tools and both MCP servers, and
-#                  max-turns capped at 2. For jobs whose prompt inlines
+#                  max-turns capped at 4. For jobs whose prompt inlines
 #                  private vault content that must never leak into a query
 #                  (rule 12) — tag-backfill and the thread-fold drain.
 run_claude() {

@@ -30,6 +30,9 @@ The rules:
 
 ## Output contract
 
+You have **no tools**. Everything you need is inlined in this prompt — do not
+attempt to read files, search, or call anything; reply directly.
+
 Return **only** a single JSON object on stdout. No prose, no markdown fences,
 no commentary before or after. The wrapper parses stdout directly.
 

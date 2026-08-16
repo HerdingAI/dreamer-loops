@@ -90,7 +90,7 @@ def page_text(payload: dict, summary: dict) -> str:
     convert_claude_export.py assembles a transcript's, so both ingestion paths
     produce byte-comparable pages.
     """
-    title = str(summary["title"]).strip().replace('"', "'")
+    title = " ".join(str(summary["title"]).replace('"', "'").split())
     fm = [
         "---",
         "type: transcript",
