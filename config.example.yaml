@@ -31,6 +31,10 @@ paths:
 corpora:
   # Unpacked claude.ai data export, or any directory of conversations.json.
   claude_export:   /path/to/claude-export
+  # Claude Code sessions (bin/ingest-cc.sh). One file per conversation at
+  # <project>/<session-id>.jsonl. Files nested deeper than that are spawned
+  # subagent transcripts and are excluded by shape — see cc_ingest below.
+  claude_code_sessions: ~/.claude/projects
   # Directories of books, papers, lecture transcripts — your reference
   # library. Any mix of .txt / .md / .pdf / .epub; see bin/verify.sh.
   wisdom_sources:
@@ -86,11 +90,44 @@ tagging:
   # this block (and the script) once the drain reports complete.
   backfill_per_run: 40
 
+# --- Claude Code session ingestion ----------------------------------------
+# bin/ingest-cc.sh. Defaults also live in scripts/convert_cc_sessions.py
+# DEFAULTS, so the job works before this block exists; anything set here wins.
+cc_ingest:
+  # Floors on what counts as a conversation rather than a one-shot command.
+  min_human_turns:      3
+  min_human_chars:      1500
+  # Never ingest a session still being written — half a conversation would be
+  # captured and never revisited.
+  min_quiet_hours:      6
+  # Fenced blocks longer than this collapse to a line count. Short ones are
+  # usually the thing being discussed rather than a paste.
+  max_code_lines:       8
+  # Summariser input budget. Owner turns are kept whole and assistant context
+  # is spent first; if owner turns alone overflow, both ends are kept and the
+  # elision is stated. The rendered prompt is held under the 128 KB Linux
+  # single-argument limit that run_claude passes it through.
+  max_summarizer_chars: 240000
+  # Sessions summarised per run — one paid summariser call each, so this
+  # bounds a run's spend and a backlog drains over several runs.
+  max_sessions_per_run: 10
+  # entrypoint is the discriminator that matters: sdk-cli sessions are
+  # headless cron runs and spawned subagents — including Dreamer's own nightly
+  # and weekly jobs. Ingesting those would feed Dreamer its own output as
+  # though it were the owner's. Never ingested.
+  entrypoints:          [cli]
+  # Escape hatch, empty by design: the entrypoint filter already excludes
+  # Dreamer's own automation.
+  exclude_projects:     []
+
 # --- budget ---------------------------------------------------------------
 budget:
   max_turns_nightly:  60
   max_turns_weekly:   150
   max_turns_backfill: 80
+  # The summariser reads one inlined session and returns JSON. It needs no
+  # tools and should not be taking turns.
+  max_turns_cc_ingest: 10
   # The thread fold reads one inlined transcript plus the current thread and
   # returns JSON. It runs RESTRICTED (run_claude 4th arg): no tools at all.
   max_turns_thread_fold: 8
