@@ -184,7 +184,7 @@ class SemanticPriorityTest(IsolatedJudgments, unittest.TestCase):
                 golden_set.judge_llm = orig_gj
 
         self.assertEqual(len(judged), 1, "cap not respected")
-        self.assertIn("Newsletter growth", judged[0][0] + judged[0][1])
+        self.assertIn("Newsletter growth by", judged[0][0] + judged[0][1])
 
 
 class JudgeOutageTest(IsolatedJudgments, unittest.TestCase):
