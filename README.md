@@ -91,13 +91,18 @@ says so in the conclusion.
 
 | Job | When | What |
 |---|---|---|
-| `nightly-extract.sh` | nightly | Ingest new conversations, extract unresolved threads, match against existing loops |
-| `weekly-dream.sh` | weekly | Research the top recurring loops, write cited conclusions, build the digest |
-| `decay-archive.sh` | weekly | Archive loops that stopped recurring |
-| `night-cycle.sh` | — | Convenience wrapper: backfill, then dream |
+| `ingest-cc.sh` | 18:30 | Sweep Claude Code sessions, summarise each as an ordinary conversation, land it as a transcript |
+| `nightly-extract.sh` | 19:00 | Ingest new conversations, extract unresolved threads, match against existing loops, fold new occurrences into threads |
+| `decay-archive.sh` | Sunday 19:30 | Archive loops that stopped recurring |
+| `night-cycle.sh` | 20:00 / 23:00 / 02:00 / 05:00 | Backfill leg, then dream leg: research the top recurring loops, write cited conclusions, build the digest |
+| `dashboard.py` | Sunday 06:00 | Dashboard backstop, after the night window closes |
+| `healthcheck.py --watchdog` | hourly at :12 | Notices when the health check itself has stopped running |
 
 `./bin/install-cron.sh` installs them. Every job takes an advisory lock, so an
-overrun never collides with its successor.
+overrun never collides with its successor. Each night cycle starts with a
+health check — run again before the dream leg, because the backfill leg
+mutates the corpus mid-cycle — and a failed blocking assertion stops only the
+leg it names, with the reason recorded in the digest.
 
 ### Reading the results
 
@@ -110,6 +115,64 @@ overrun never collides with its successor.
   local view.
 - **MCP tools** — query the vault mid-conversation from Claude Desktop or any
   MCP client. See [`docs/mcp-setup.md`](docs/mcp-setup.md).
+
+---
+
+## Health spine
+
+Every defect a system like this ships tends to have the same shape: a state
+change happened somewhere, and the component that gated on it was never told —
+a vocabulary froze but the extractor kept refusing to tag; documents were
+indexed but never embedded; a sort was fixed in one write path and violated by
+another. `scripts/healthcheck.py` exists to assert those relationships
+mechanically. It runs at the top of every job (and again before the dream leg,
+because the backfill leg mutates the corpus mid-cycle), never calls an LLM,
+and never mutates the state it checks.
+
+Each assertion carries a severity: `info` is recorded only, `degraded` writes
+a digest event, `blocking` also names the leg it stops — a dead retrieval
+index blocks `research` for one cycle, nothing else. A blocked leg exits
+cleanly with its reason in the digest; a blocked night reads like a quiet one,
+never a crash. The record lives under `health` in `run-state.json`; jobs
+consult it via `leg_blocked` in `bin/_common.sh`. The hourly watchdog cron
+checks only that the record itself is fresh, from outside the pipeline, so a
+whole-run death is still visible.
+
+Discipline going forward (rule 15): every future repair of a
+state-relationship defect ships with a matching healthcheck assertion or lint
+invariant — otherwise the spine decays into a museum of past defects.
+
+Standing owner gates are closed by writing
+`vault/.vault-meta/gate-state.json` — configure them under `health.gates`.
+
+---
+
+## The living thread
+
+Every loop page carries a `## Thread (derived — hypothesis, not evidence)`
+section: **Now** — the current position of the idea, a few sentences, each
+claim citing its occurrence — and **Trajectory** — an append-only dated line
+per conversation, so a long-running loop reads as months of movement instead
+of a flat link list.
+
+When a new transcript occurrence joins a loop, it is queued in
+`fold-pending.json`; the extraction wrappers drain the queue with one
+restricted, no-tools LLM pass per occurrence (`skills/thread-fold/PROMPT.md`)
+and `scripts/apply_thread.py` applies the result deterministically — it
+replaces only the Thread section, validates every citation against the loop's
+own occurrence list, and leaves frontmatter byte-identical. Fold input is the
+current thread plus the one new occurrence, never the full history (rule 14),
+and a paused loop shows a zero diff on nights of unrelated input (rule 2).
+
+The thread is derived tier by construction: its citations carry a
+`via thread` marker that `apply_conclusion.py` grades as derived, capping any
+claim copied from a thread at `contested` until re-derived from the transcript
+itself (rule 13). The weekly dream receives the thread as a hypothesis to
+re-test — served after the primary occurrences, never instead of them — and a
+re-researched conclusion may rebuild Now from primary sources, which is the
+drift-correction path. Entries that keep failing are quarantined loudly after
+`thread.fold_max_attempts`; queue depth and age have their own health
+assertion.
 
 ---
 
@@ -155,11 +218,11 @@ Full walkthrough: **[docs/getting-started.md](docs/getting-started.md)**.
 | **[Configuration](docs/configuration.md)** | Every knob in `config.yaml`, and how to pick values from your own data |
 | **[MCP setup](docs/mcp-setup.md)** | Query your vault from a chat client |
 | **[CLAUDE.md](CLAUDE.md)** | The constitution itself — the complete behavioural spec |
-| **[dreamer-spec-v2.md](dreamer-spec-v2.md)** | Full design spec with the decision log |
+| **[dreamer-spec-v2.md](dreamer-spec-v2.md)** | Full design spec with the decision log (v2.1 — the health spine, living thread, and Claude Code ingestion postdate it; `CLAUDE.md` and `docs/architecture.md` are current) |
 
 ### `CLAUDE.md` is the interesting file
 
-It is the system's constitution: fourteen numbered rules that fully specify how
+It is the system's constitution: fifteen numbered rules that fully specify how
 the reasoning engine must behave. A headless run given only that file and a
 transcript produces correct output with no further prompting. Every constant it
 names lives in `config.yaml` — the rules stay readable, the numbers stay
@@ -182,6 +245,12 @@ code. If you want to *change* its behaviour, change `CLAUDE.md` first.
   canonical statement. Verbatim transcript text, personal identifiers, and
   third-party names are never sent. Every query and fetched URL is logged and
   appears in the digest.
+- **The fold and tag legs cannot reach the web.** They run the model in a
+  restricted, output-only mode — no web search or fetch, no shell, no file
+  tools, no edit permission — so a prompt-injected transcript can neither
+  exfiltrate private content through a composed URL nor write the vault
+  directly; the deterministic appliers do all writing. Rule 12's zero-egress
+  property is asserted, not assumed.
 - **`vault/` is deliberately *not* gitignored** — the jobs commit it on every
   run, and that history is the audit trail. The consequence is that a working
   clone contains your private notes. So: keep your clone private, or better,

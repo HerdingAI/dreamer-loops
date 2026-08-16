@@ -1,6 +1,6 @@
 # The rules, and why they exist
 
-`CLAUDE.md` is Dreamer's constitution: fourteen numbered rules that fully
+`CLAUDE.md` is Dreamer's constitution: fifteen numbered rules that fully
 specify how the reasoning engine behaves. This page is the plain-English tour —
 what each rule does, and the failure it exists to prevent.
 
@@ -316,6 +316,45 @@ with the serve recorded in the digest. A hard cooldown applies regardless.
 eligible again. One loop produced four superseding conclusions in two days.
 Cost grows with the size of the archive, and the output gets worse, because
 each generation is reasoning about the last one instead of about your material.
+
+---
+
+## Rule 15 — The living thread, and the health spine
+
+Each loop body keeps one `## Thread (derived — hypothesis, not evidence)`
+section: a **Now** paragraph and an append-only **Trajectory** list — the
+loop's latest synthesized state. The thread is derived tier, so rule 13
+applies in full: a citation carrying the `via thread` marker grades derived,
+and the weekly dream receives the thread as a hypothesis to re-test, never as
+evidence. It refreshes **only** on a matching transcript occurrence — rule 2's
+zero-diff-on-unrelated-nights guarantee still holds — and a fold's input is
+the current thread plus the *one* new occurrence, never the loop's accumulated
+history (rule 14's linearity promise, applied to threads).
+
+The same rule houses the health spine. `scripts/healthcheck.py` is the
+system's assertion spine: mechanical comparisons of two pieces of existing
+state, run at the top of every job, never an LLM call, never a mutation.
+Severities are `info` (recorded), `degraded` (digest event), and `blocking`
+(event plus the named leg in `health.blocked_legs` of `run-state.json`, which
+jobs consult via `leg_blocked`). A blocked leg exits cleanly with its reason —
+a blocked night must read as legibly as a quiet one. And a growth discipline:
+every future repair of a state-relationship defect ships with a matching
+healthcheck assertion or lint invariant — otherwise the spine decays into a
+museum of past defects.
+
+One carve-out: the one-time thread and tag backfills
+(`bin/thread-backfill.sh`, `bin/tag-backfill.sh`) may touch `paused` and
+`decision-only` pages once, at feature initialization. Without it the
+backfill's value dies against rule 2 — the same tension rule 3's decay floor
+resolves for a backfill's timestamps. Rule 2 binds every night thereafter.
+
+**Why the thread:** a loop with a dozen occurrences used to be a flat link
+list — the *movement* of the idea across months was exactly the thing worth
+keeping and exactly what nothing recorded. **Why the spine:** every shipped
+defect had the same shape — a state change happened somewhere, and the
+component gating on it was never told. Asserting those relationships
+mechanically, on every run, keeps that class of failure visible instead of
+silent.
 
 ---
 

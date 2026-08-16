@@ -80,6 +80,13 @@ grep -c REDACTED vault/sources/transcripts/**/*.md
 What you now have in `vault/sources/transcripts/` is immutable. Nothing in the
 system ever modifies it.
 
+If you also use Claude Code, `./bin/ingest-cc.sh` sweeps your sessions
+(`corpora.claude_code_sessions`, default `~/.claude/projects`), summarises
+each real conversation as a plain transcript, and lands it in the same tree
+with `source_agent: claude-code` frontmatter. It runs from cron once you go
+live; running it by hand first shows you what qualifies — refusals are
+recorded with a reason, so you can see why a session was skipped.
+
 ---
 
 ## 4. Calibrate before you backfill
@@ -190,13 +197,34 @@ decay:
 ./bin/install-cron.sh
 ```
 
-That installs the nightly extraction, the weekly dream, and the weekly decay
-pass. Every job takes an advisory lock, so an overrun never collides with its
-successor.
+That installs the whole schedule: the Claude Code session sweep
+(`ingest-cc.sh`, 18:30), the nightly extraction (19:00), the weekly decay
+pass (Sunday 19:30), the night cycle (backfill leg then dream leg at 20:00 /
+23:00 / 02:00 / 05:00, with a health check at the top of each cycle and again
+before the dream leg), a weekly dashboard backstop (Sunday 06:00), and the
+hourly health watchdog (:12). Every job takes an advisory lock, so an overrun
+never collides with its successor, and a failed blocking health assertion
+stops only the leg it names — with the reason in the digest.
 
 Nothing can archive for a full `decay_weeks` window from the date you set —
 including loops the backfill minted with old timestamps. That floor is
 deliberate (see [the rules](the-rules.md#rule-3--the-decay-rule)).
+
+### Optional: the one-time drains
+
+Two initialization drains exist for vaults that predate their features, and
+neither matters until you have a populated vault:
+
+- `./bin/tag-backfill.sh` — tags loops created before you froze a tag
+  vocabulary. Pointless before the vocabulary exists (rule 4).
+- `./bin/thread-backfill.sh` — builds the initial
+  `## Thread` section for existing loops, oldest first. On a fresh vault,
+  threads accrete on their own as occurrences arrive.
+
+Both are resumable, report when the drain is complete, and are safe to delete
+afterwards — they are the only paths allowed to touch `paused` and
+`decision-only` pages, once, at initialization
+(see [rule 15](the-rules.md#rule-15--the-living-thread-and-the-health-spine)).
 
 ---
 

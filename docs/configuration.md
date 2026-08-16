@@ -81,12 +81,13 @@ current script writes to it.
 ```yaml
 corpora:
   claude_export:   /path/to/claude-export
+  claude_code_sessions: ~/.claude/projects
   wisdom_sources:
     - /path/to/your/library
   wisdom_build:    wisdom_md
 ```
 
-Both corpora are optional, and each degrades a specific thing.
+All corpora are optional, and each degrades a specific thing.
 
 ### `claude_export`
 
@@ -114,6 +115,18 @@ the same shape and reuses `dreamer_common.redact()`.
 
 In practice you will mostly use `./bin/ingest.sh`, which takes drops from
 `to_ingest/` regardless of this setting.
+
+### `claude_code_sessions`
+
+Default `~/.claude/projects`. Where `bin/ingest-cc.sh` sweeps for Claude Code
+sessions — one `.jsonl` file per conversation at `<project>/<session-id>.jsonl`.
+Files nested deeper than that are spawned subagent transcripts and are excluded
+by shape. What qualifies, and how sessions are summarised into transcripts, is
+governed by the [`cc_ingest`](#cc_ingest) block below.
+
+**Without it** (or without ever running `ingest-cc.sh`), nothing breaks — you
+simply track loops from claude.ai conversations only. Point it elsewhere only
+if your Claude Code home is non-standard.
 
 ### `wisdom_sources`
 
@@ -371,6 +384,103 @@ This one is an operator-facing number — no script reads it.
 
 ---
 
+## `tagging`
+
+```yaml
+tagging:
+  backfill_per_run: 40
+```
+
+### `backfill_per_run`
+
+Default `40`. Batch size for `bin/tag-backfill.sh`, the **one-time** drain
+that tags loops created before your vocabulary was frozen (rule 15's
+initialization carve-out — it is the only tagging path allowed to touch
+`paused` and `decision-only` pages). Ongoing tagging needs no knob: once
+`vault/.vault-meta/tag-vocabulary.json` exists, extraction emits
+vocabulary-validated tags as part of its normal pass, and `apply_tags.py`
+rejects anything outside the vocabulary (rule 4).
+
+**How to choose:** leave it. The drain is resumable, so the batch size only
+sets how much one run bites off. The key — and the script — are safe to
+delete once the drain reports complete.
+
+---
+
+## `cc_ingest`
+
+```yaml
+cc_ingest:
+  min_human_turns:      3
+  min_human_chars:      1500
+  min_quiet_hours:      6
+  max_code_lines:       8
+  max_summarizer_chars: 240000
+  max_sessions_per_run: 10
+  entrypoints:          [cli]
+  exclude_projects:     []
+```
+
+Governs `bin/ingest-cc.sh` (see
+[architecture.md §10](architecture.md#10-claude-code-session-ingestion)).
+Defaults also live in `scripts/convert_cc_sessions.py`, so the job works
+before this block exists; anything set here wins.
+
+### `min_human_turns` and `min_human_chars`
+
+Defaults `3` and `1500`. Floors on what counts as a conversation rather than
+a one-shot command. Below either floor the session is refused — with the
+reason recorded in the ledger, so an over-strict filter and a quiet week do
+not look the same.
+
+**How to choose:** raise them if your transcripts fill with trivial
+"run this, thanks" sessions; lower `min_human_chars` if you tend to hold real
+design conversations in short turns.
+
+### `min_quiet_hours`
+
+Default `6`. A session must have been idle this long before it is ingested —
+never capture half a conversation that is still being written, because the
+ledger would mark it done and the rest would never be revisited.
+
+**How to choose:** longer than your longest realistic mid-session break.
+
+### `max_code_lines`
+
+Default `8`. Fenced blocks longer than this collapse to a line count before
+the summariser sees them. Short blocks are usually the thing being discussed;
+long ones are pastes that would drown the conversation.
+
+### `max_summarizer_chars`
+
+Default `240000`. Summariser input budget per session. Owner turns are kept
+whole and assistant context is spent first; if owner turns alone overflow,
+both ends are kept and the elision is stated in the rendered prompt.
+
+### `max_sessions_per_run`
+
+Default `10`. Sessions summarised per run — one paid model call each, so this
+bounds a run's spend and lets a backlog drain over several runs.
+
+**How to choose:** by how many qualifying sessions a day you actually
+produce. The 18:30 job runs daily, so a cap above your daily output means the
+backlog never grows.
+
+### `entrypoints`
+
+Default `[cli]`, and this is the discriminator that matters: `sdk-cli`
+sessions are headless cron runs and spawned subagents — **including Dreamer's
+own nightly and weekly jobs**. Ingesting those would feed Dreamer its own
+output as though it were yours. Do not widen this casually.
+
+### `exclude_projects`
+
+Default `[]` — an escape hatch, empty by design, because the entrypoint
+filter already excludes Dreamer's own automation. List project directory
+names here only if there is a project whose sessions you never want tracked.
+
+---
+
 ## `budget`
 
 ```yaml
@@ -378,6 +488,8 @@ budget:
   max_turns_nightly:  60
   max_turns_weekly:   150
   max_turns_backfill: 80
+  max_turns_cc_ingest: 10
+  max_turns_thread_fold: 8
   model: sonnet
   cost_ceiling_per_run: null
 ```
@@ -397,6 +509,15 @@ cited page.
 usable results is not turn-starved; raise a limit only when you see work cut
 short mid-page in `logs/`. Raising limits raises the ceiling on a bad run's
 cost, so do it deliberately.
+
+### `max_turns_cc_ingest` and `max_turns_thread_fold`
+
+Defaults `10` and `8`, and deliberately small. The session summariser reads
+one inlined session and returns JSON; the thread fold reads one inlined
+transcript plus the current thread and returns JSON. Both run without tools —
+the fold in fully restricted, output-only mode — so neither should be taking
+turns. A cap this low is a tripwire: hitting it means the prompt is
+misbehaving, not that the job needs more room.
 
 ### `model`
 
@@ -528,6 +649,139 @@ cooldown above still applies underneath it.
 
 ---
 
+## `thread`
+
+```yaml
+thread:
+  fold_per_run: 20
+  fold_max_attempts: 5
+  fold_queue_max: 80
+  fold_queue_max_age_days: 7
+  backfill_per_run: 60
+```
+
+The living-thread fold queue (rule 15; see
+[architecture.md §9](architecture.md#9-the-living-thread)).
+
+### `fold_per_run`
+
+Default `20`. Fold passes per extraction run — one restricted model call each,
+so this bounds a run's fold spend. Entries over the cap stay queued and drain
+next run.
+
+**How to choose:** above your typical nightly occurrence count, so the queue
+drains to zero most nights. If the fold-queue health assertion starts firing,
+raise this before touching the queue limits.
+
+### `fold_max_attempts`
+
+Default `5`. A fold that keeps failing is a defect, not work to re-buy every
+night: after this many attempts the entry moves to
+`vault/.vault-meta/fold-quarantine.json` with one `degraded` event.
+
+### `fold_queue_max` and `fold_queue_max_age_days`
+
+Defaults `80` and `7`. Thresholds for the fold-queue health assertion
+(`degraded`): depth above the max means folds are enqueued faster than the
+drain retires them; any entry older than the age limit means the drain has
+stopped retiring it. Entries without an `enqueued_at` stamp count as fresh.
+
+**How to choose:** leave them. They are alarms, not behaviour — the fix for a
+firing alarm is `fold_per_run` or the quarantine list, not a bigger alarm.
+
+### `backfill_per_run`
+
+Default `60`. Drain cap for `bin/thread-backfill.sh`, the one-time drain that
+builds initial threads for a pre-existing vault — counted in **fold passes**,
+not loops. The key and the script are safe to delete once the backfill
+reports drain complete.
+
+---
+
+## `health`
+
+```yaml
+health:
+  checked_max_age_hours: 16
+  embed_pending_max: 50
+  index_stale_hours: 30
+  untagged_window_days: 14
+  cost_max_per_run: 50.00
+  cost_window_days: 7
+  gates: []
+```
+
+Thresholds for the health spine (see
+[architecture.md §8](architecture.md#8-the-health-spine)). Every one is an
+assertion input, never behaviour: changing a value changes when an alarm
+fires, not what any job does.
+
+### `checked_max_age_hours`
+
+Default `16`. How stale the health record may get before the hourly watchdog
+raises a `degraded` event. Set it to the longest quiet gap in your cron
+schedule plus slack — in the stock schedule that gap runs from the 05:00
+night cycle to the 18:30 ingest, so 16 covers it without false alarms.
+
+### `embed_pending_max`
+
+Default `50`. Documents awaiting embedding before retrieval counts as
+degraded — indexed-but-not-embedded is exactly the silent state the spine
+exists to catch, because BM25 keeps returning rows while semantic search
+quietly reads an older corpus.
+
+### `index_stale_hours`
+
+Default `30`. How old the search index may be before the assertion fires:
+nightly reindex cadence plus slack. If you disable the nightly jobs, raise
+this or the assertion fires permanently.
+
+### `untagged_window_days`
+
+Default `14`. The window for the vocabulary-applied check: once a tag
+vocabulary is frozen, recently touched loops should be carrying tags. A
+frozen vocabulary with a growing untagged population is the
+"state changed, gating component never told" failure in its original form.
+
+### `cost_max_per_run` and `cost_window_days`
+
+Defaults `50.00` and `7`. A recorded run cost above the max, within the
+window, fails the cost assertion. Set the max above any legitimate single
+run; the window keeps an old expensive backfill from tripping the check
+forever.
+
+### `gates`
+
+Default `[]`. Standing owner reminders, each
+`{flag: <name>, text: "<what is still open>"}`, surfaced as `info` assertions
+on every run. Close one by writing `vault/.vault-meta/gate-state.json` with
+`{"<name>": true}`. Use a gate for anything you must not forget but a job
+cannot check — an acceptance review you owe yourself, a migration you left
+half-planned.
+
+---
+
+## `qmd`
+
+```yaml
+qmd:
+  collections: [vault, transcripts, conclusions, wisdom]
+```
+
+### `collections`
+
+The qmd collections `reindex` in `bin/_common.sh` refreshes every run — and
+the same list the healthcheck's `collections-covered` and `index-fresh`
+assertions hold that refresh to, so the config, the refresh and the assertion
+cannot drift apart separately. A missing or empty list is loud: reindex logs
+an error and records a `degraded` event rather than silently skipping.
+
+**How to choose:** leave it matching your qmd setup. Removing `wisdom` does
+not disable the wisdom route — leave the list alone and let an unbuilt corpus
+degrade the route honestly instead (rule 5a).
+
+---
+
 ## `mcp`
 
 ```yaml
@@ -596,7 +850,11 @@ measurements were taken against.
 | Research silently stopped running, no error | `budget.cost_ceiling_per_run` | Check `run-state.json → skip_research_next_run`; on a subscription, set the ceiling back to `null` |
 | Jobs cut off mid-page | `budget.max_turns_*` | Raise the one for that job |
 | Freshness warning on every digest | `freshness.stale_inbox_days` | Raise it to match your export interval |
+| Fold-queue health assertion keeps firing | `thread.fold_per_run` | Raise it — the alarm thresholds (`fold_queue_max*`) are the last thing to touch |
+| The same fold fails night after night | `thread.fold_max_attempts` | Check `fold-quarantine.json` first — a repeat failure is a defect, not a budget problem |
+| Claude Code sessions you expected never appear | `cc_ingest.min_human_turns` / `min_human_chars` | Check the refusal reasons in `cc-ingested.json`, then lower the floor that refused them |
+| Health record goes stale every day at the same time | `health.checked_max_age_hours` | Raise it past your schedule's longest quiet gap |
 | Conclusions cite no books at all | not a config problem | `qmd` is not on `PATH` under cron, or `corpora.wisdom_sources` is unbuilt — check `logs/` for the `degraded` event |
 
 For anything that is not a knob, see
-[architecture.md § Where to look when something breaks](architecture.md#8-where-to-look-when-something-breaks).
+[architecture.md § Where to look when something breaks](architecture.md#11-where-to-look-when-something-breaks).

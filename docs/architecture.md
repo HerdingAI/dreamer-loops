@@ -2,6 +2,7 @@
 
 For someone who wants to understand or change how Dreamer works. It assumes you
 have read the [README](../README.md) and skimmed [CLAUDE.md](../CLAUDE.md).
+Design notes referenced from the code live here.
 
 The single organising idea: **the LLM decides *what*, Python decides *where the
 bytes go*.** The model judges what counts as an unresolved thread, which
@@ -212,6 +213,12 @@ consumes and deletes it. Kinds in use: `conclusions`, `served`,
 | `probe_recall.py` | Retrieval recall gate using the owner's *raw* transcript openings as probes, not hand-written ones. |
 | `propose_tags.py` | Deterministic tag-vocabulary proposal; `freeze` writes `tag-vocabulary.json`, after which lint enforces it. |
 | `build_wisdom_corpus.py` | Converts a mixed library (txt / epub / pdf / doc) into `wisdom_md/` for qmd. Source files are read-only. |
+| `healthcheck.py` | The assertion registry: mechanical state comparisons, three severities, leg blocking, `--watchdog` mode. See §8. No LLM calls, no mutations of what it checks. |
+| `fold_pending.py` | The living-thread fold queue: enqueue on new occurrences, batch for the drain, quarantine repeat failures. See §9. |
+| `apply_thread.py` | Applies one fold result deterministically: replaces only the Thread section, validates citations against the loop's occurrence list, frontmatter byte-identical. |
+| `apply_tags.py` | Applies vocabulary-validated tags; rejects anything outside `tag-vocabulary.json` (rule 4). Backs `bin/tag-backfill.sh`. |
+| `convert_cc_sessions.py` | Claude Code session triage + summariser prompt: entrypoint/turn/quiet-hours filters, code-fence collapsing, the `cc-ingested.json` ledger. See §10. |
+| `apply_cc_session.py` | Writes one summarised session as a transcript page — or refuses and writes nothing if the page still carries a code fence, a path, or anything `redact()` would have caught. |
 | `dreamer_mcp.py` | The MCP server. See §7. |
 
 ---
@@ -255,12 +262,14 @@ dashboard can run on a timer with no lock at all.
 
 | Job | Schedule | Sequence |
 |---|---|---|
-| `nightly-extract.sh` | nightly | convert inbox → batch → extract → apply → mark batch → reindex → catalog → commit. Empty batch is a near-zero-cost no-op that still drains queued resurfacings. |
-| `weekly-dream.sh` | weekly | ingest marks → recover stranded → cost-ceiling check → select → **per-loop**: prompt, mark `researching`, research, apply, grade, commit → merge refresh → lint → digest → reindex → catalog → commit. |
-| `decay-archive.sh` | weekly, 15 min before the dream | `run_decay()`, stage `archived` items into `pending.json`, catalog, commit. |
-| `backfill.sh [N]` | manual | Up to N extraction batches, resuming from the checkpoint. A failed apply quarantines the batch by name and continues, rather than stalling the queue forever on one bad transcript. |
-| `night-cycle.sh [N]` | cron | Backfill leg then dream leg in **one** wrapper — they share the advisory lock, so co-scheduling them would starve whichever started second. |
+| `ingest-cc.sh` | 18:30, ahead of extraction | Sweep Claude Code sessions → triage → summarise → apply as transcripts (§10). Takes no vault lock — conversion is append-only and atomic — but is scheduled clear of the others anyway. |
+| `nightly-extract.sh` | 19:00 | healthcheck → convert inbox → batch → extract → apply → mark batch → drain the fold queue (§9) → reindex → catalog → commit. Empty batch is a near-zero-cost no-op that still drains queued resurfacings and folds. |
+| `weekly-dream.sh` | the night-cycle dream leg | ingest marks → recover stranded → cost-ceiling check → select → **per-loop**: prompt, mark `researching`, research, apply, grade, commit → merge refresh → lint → digest → reindex → catalog → commit. |
+| `decay-archive.sh` | Sunday 19:30, before the night window opens | `run_decay()`, stage `archived` items into `pending.json`, catalog, commit. |
+| `backfill.sh [N]` | the night-cycle backfill leg, or manual | Up to N extraction batches, resuming from the checkpoint. A failed apply quarantines the batch by name and continues, rather than stalling the queue forever on one bad transcript. |
+| `night-cycle.sh [N]` | 20:00 / 23:00 / 02:00 / 05:00 | healthcheck → backfill leg → healthcheck again (the backfill leg mutates the corpus mid-cycle) → dream leg, in **one** wrapper — the legs share the advisory lock, so co-scheduling them would starve whichever started second. A `blocking` health assertion stops only the leg it names (§8). |
 | `ingest.sh` | manual | Standardised drop point: put an export in `to_ingest/`, run with no arguments. Deliberately does **not** take the lock — conversion is append-only and atomic. |
+| `tag-backfill.sh` / `thread-backfill.sh` | once, manual | One-time initialization drains for pre-existing vaults (§9 and rule 15's carve-out). Safe to delete once they report complete. |
 | `verify.sh` | manual | Acceptance sweep: reindex, catalog, lint, unit tests, `probe_recall.py` gate, conclusion rubric, golden set (`--skip-golden` omits the only paid gate). |
 | `dashboard.sh` | manual | `--open` / `--serve`. Sources nothing: no lock, no commit. |
 | `install-cron.sh` | once | Installs the block idempotently, with an explicit `PATH` for node/qmd. |
@@ -398,7 +407,119 @@ heading, capped at `mcp.note_max_chars`, with the queue capped at
 
 ---
 
-## 8. Where to look when something breaks
+## 8. The health spine
+
+`scripts/healthcheck.py` holds a registry of assertions, each a **mechanical
+comparison of two pieces of existing state** — vocabulary frozen vs. tags
+applied, documents indexed vs. embedded, cron cadence vs. last-checked stamp.
+Never an LLM call, never a mutation. It runs at the top of every job and again
+before the night cycle's dream leg, because the backfill leg mutates the
+corpus mid-cycle.
+
+Three severities:
+
+| Severity | Effect |
+|---|---|
+| `info` | Recorded in the health record only — standing reminders live here |
+| `degraded` | Also writes a digest event |
+| `blocking` | Also names the leg it stops in `health.blocked_legs` |
+
+The full record — `{checked_at, blocked_legs, assertions[]}` — lives under
+`health` in `vault/.vault-meta/run-state.json`. Jobs consult it through
+`leg_blocked` in `bin/_common.sh`; a blocked leg exits cleanly with its reason
+recorded as an event, so a blocked night reads as legibly as a quiet one. The
+blast radius is deliberately minimal: a dead retrieval index blocks the
+`research` leg for one cycle and nothing else.
+
+Two pieces sit outside the registry. The **watchdog** (`healthcheck.py
+--watchdog`, hourly at :12) compares only `health.checked_at` against
+`health.checked_max_age_hours` and logs to `logs/watchdog.log` — a channel
+outside the pipeline it watches — so a whole-run death is still visible.
+**Owner gates** (`health.gates` in config) are standing `info` reminders,
+closed by writing `vault/.vault-meta/gate-state.json`.
+
+The spine only stays useful under rule 15's growth discipline: every repair of
+a state-relationship defect ships with a matching assertion or lint invariant.
+
+---
+
+## 9. The living thread
+
+Each loop body carries one `## Thread (derived — hypothesis, not evidence)`
+section — a **Now** paragraph and an append-only **Trajectory** list — kept
+current by a three-stage path that mirrors the extract/apply split everywhere
+else:
+
+1. **Queue.** When `add_occurrence()` attaches a new transcript to a loop,
+   `vault.enqueue_fold_pending()` appends `{loop, occurrence}` to
+   `vault/.vault-meta/fold-pending.json`. Append-only; duplicates collapse on
+   read.
+2. **Restricted fold.** The extraction wrappers drain up to `thread.fold_per_run`
+   entries per run (`drain_fold_pending` in `bin/_common.sh`). Each fold is one
+   `run_claude ... restricted` call — output-only, headless deny-by-default: no
+   web tools, no shell, no file tools — rendering `skills/thread-fold/PROMPT.md`
+   over the current thread plus the **one** new occurrence, never the loop's
+   accumulated history.
+3. **Deterministic applier.** `scripts/apply_thread.py` replaces only the
+   Thread section, validates every citation against the loop's own occurrence
+   list, and leaves frontmatter byte-identical.
+
+The thread is derived tier (rule 13): its citations carry a `via thread`
+marker that `apply_conclusion.py` grades as derived, capping any claim copied
+from a thread at `contested` until re-derived from primary sources. The dream
+prompt receives the thread as a hypothesis to re-test, after the primary
+occurrences.
+
+Failure handling is loud, not looping: an entry that fails
+`thread.fold_max_attempts` times moves to `fold-quarantine.json` with a
+`degraded` event, and queue depth/age have their own health assertion
+(`thread.fold_queue_max`, `thread.fold_queue_max_age_days`).
+`bin/thread-backfill.sh` is the one-time drain that builds initial threads for
+a pre-existing vault, oldest-first — the only path allowed to touch `paused`
+and `decision-only` pages (rule 15's carve-out).
+
+---
+
+## 10. Claude Code session ingestion
+
+`bin/ingest-cc.sh` (18:30, before extraction so its output is in that night's
+queue) sweeps `corpora.claude_code_sessions` — one `.jsonl` per session under
+`~/.claude/projects` — and lands ordinary transcripts in
+`vault/sources/transcripts/YYYY/MM/`, distinguished only by frontmatter
+`source_agent: claude-code`. Everything downstream reads one tree.
+
+Three stages:
+
+1. **Triage** (`scripts/convert_cc_sessions.py`). Only sessions that are
+   actually conversations qualify: `entrypoint: cli` (headless cron runs and
+   spawned subagents — including Dreamer's own jobs — are `sdk-cli` and never
+   ingested, or the system would feed on its own output), floors on human
+   turns and characters (`cc_ingest.min_human_turns`, `min_human_chars`), and
+   a quiet window (`min_quiet_hours`) so a session still being written is
+   never half-captured. Rejections are recorded with a reason in the ledger,
+   `vault/.vault-meta/cc-ingested.json` (keyed by session id), so an
+   over-strict filter and a quiet week do not look the same.
+2. **Summarise.** A coding session is mostly code, tool calls and diffs, none
+   of which belongs in the vault. One model call per session
+   (`budget.max_turns_cc_ingest`) rewrites it as a plain conversation plus a
+   four-field abstract — goal, solution reached, outcome, and what was left
+   unresolved — which is the field extraction actually feeds on. Long fenced
+   blocks are collapsed before the call (`cc_ingest.max_code_lines`), and
+   `cc_ingest.max_sessions_per_run` bounds a run's spend.
+3. **Apply** (`scripts/apply_cc_session.py`). Writes one transcript page — or
+   refuses and writes nothing: a page that still carries a fenced code block,
+   a filesystem path, or anything `redact()` would have caught is rejected,
+   because `vault/sources/` is immutable and committed, so a page written
+   wrong cannot be quietly fixed.
+
+Everything on such a page is Dreamer-generated and therefore derived tier
+under rule 13 — which is fine, because what a transcript occurrence feeds is
+*relevance* (recurrence and recency), and relevance and evidence are separate
+axes by construction.
+
+---
+
+## 11. Where to look when something breaks
 
 Start here, in this order:
 
