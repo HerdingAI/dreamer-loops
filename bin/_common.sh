@@ -130,12 +130,19 @@ run_claude() {
     perm_args=(--permission-mode acceptEdits
                --allowedTools "Bash(qmd:*)" "mcp__qmd" "WebSearch" "WebFetch")
   fi
-  "$CLAUDE_BIN" -p "$(cat "$prompt_file")" \
+  # The prompt goes in on STDIN, never in argv. Linux caps a SINGLE argv
+  # element at MAX_ARG_STRLEN (32 pages = 128 KB) no matter how large ARG_MAX
+  # is, so `-p "$(cat "$prompt_file")"` fails execve with E2BIG the moment a
+  # prompt crosses that line: bash reports 126 and the branch below recorded
+  # that as a usage-limit deferral — an honest-looking log line for a bug that
+  # recurs every run. convert_cc_sessions' bounded_prompt() was the local
+  # workaround for the same limit in one job; stdin fixes it for every job.
+  "$CLAUDE_BIN" -p \
       --output-format json \
       ${model:+--model "$model"} \
       --max-turns "$max_turns" \
       "${perm_args[@]}" \
-      > "$raw" 2>>"$LOGS/$JOB.log"
+      < "$prompt_file" > "$raw" 2>>"$LOGS/$JOB.log"
   local code=$?
   set -e
 

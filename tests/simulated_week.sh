@@ -694,6 +694,43 @@ q = json.load(open('vault/.vault-meta/fold-pending.json'))
 print(sum(1 for x in q if x['loop_id'] == '$F_ID'))")
 check "failing loop's queue drained after recovery" "0" "$FQ"
 
+# --- oversized prompt delivery (execve E2BIG) -----------------------------
+# Linux caps a SINGLE argv element at MAX_ARG_STRLEN (32 pages = 128 KB), so
+# `claude -p "$(cat prompt)"` fails execve with E2BIG on a large prompt: bash
+# reports 126 and run_claude recorded that as a usage-limit deferral — an
+# honest-looking log line for a bug that recurs every run. The real CLI is
+# not needed to pin this: the stub records what it received, and the
+# pre-fix code never reaches the stub at all.
+step "Oversized prompt reaches the CLI on stdin, not argv"
+BIGP="$WORK/logs/.prompt-e2big.md"
+python3 -c "open('$BIGP', 'w').write('x' * 200000)"
+cat > "$WORK/bin/stub-claude" <<'EOS'
+#!/usr/bin/env bash
+# Stands in for the CLI: keeps whatever arrived on stdin, then prints the
+# --output-format json envelope run_claude parses.
+cat > "$STUB_SEEN"
+printf '{"result": "{}", "total_cost_usd": 0.01}\n'
+EOS
+chmod +x "$WORK/bin/stub-claude"
+# DREAMER_FAKE_CLAUDE is exported for the rest of this file and short-circuits
+# run_claude before it ever execs a CLI — the exact path under test. Blanking
+# it (the wrapper tests for non-empty) sends this one call down the real
+# invocation path, into the stub below.
+BIGRC=$(cd "$WORK" && JOB=e2big CLAUDE_BIN="$WORK/bin/stub-claude" \
+        DREAMER_FAKE_CLAUDE= STUB_SEEN="$WORK/logs/.e2big-seen.txt" \
+        bash -c 'source bin/_common.sh
+                 run_claude "'"$BIGP"'" 4 "'"$WORK"'/logs/.result-e2big.json" \
+                            restricted
+                 echo "rc=$?"' </dev/null 2>/dev/null | tail -1)
+check "run_claude survives a 200 KB prompt (no E2BIG deferral)" "rc=0" "$BIGRC"
+check "the whole prompt reached the CLI" "200000" \
+      "$(wc -c < "$WORK/logs/.e2big-seen.txt" 2>/dev/null || echo 0)"
+BIGDEF=$(python3 -c "
+import json
+d = json.load(open('$WORK/vault/.vault-meta/run-state.json'))
+print(sum(1 for x in d.get('deferrals', []) if x.get('job') == 'e2big'))")
+check "no deferral recorded for the oversized prompt" "0" "$BIGDEF"
+
 printf '\n\033[1m== Result ==\033[0m\n'
 printf '  passed: %s\n  failed: %s\n  sandbox: %s\n' "$PASS" "$FAIL" "$WORK"
 [[ "$FAIL" -eq 0 ]] || exit 1
