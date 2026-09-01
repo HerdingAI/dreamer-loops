@@ -252,6 +252,51 @@ def enqueue_backfill() -> dict:
     return {"loops": len(selected), "enqueued": enqueued}
 
 
+def requeue_quarantined() -> dict:
+    """Move every quarantined entry back onto the queue with `attempts`
+    cleared — the repair half of the contract fold-queue-current names
+    ("repair and re-enqueue"), which had no implementation.
+
+    Quarantine records THAT a fold failed its cap, never WHY. When the cause
+    turns out to be the harness rather than the entry, those attempts were
+    spent on a bug: carrying them forward re-quarantines the entry on its
+    first real try, before the LLM is ever called. That is exactly what
+    happened on 2026-08-16 — every one of the 20 quarantined entries had a
+    transcript over the 128 KB execve argv cap, so not one of them had ever
+    reached the model. Clearing the count is the honest state; an entry that
+    is genuinely broken simply re-earns its cap.
+
+    Within a loop, folds must stay oldest-first (apply_thread appends
+    trajectory lines in fold order and sorts nothing), so a requeued entry is
+    inserted BEFORE that loop's first queued entry — a quarantined entry
+    blocked the later ones, so it is always the older work. Entries the
+    backfill already re-enqueued are left alone rather than duplicated.
+    """
+    q = read_json(quarantine_path(), default=[]) or []
+    entries = load()
+    known = {_identity(e) for e in entries}
+    requeued = 0
+    for item in q:
+        loop_id = str(item.get("loop_id") or "")
+        occurrence = str(item.get("occurrence") or "")
+        if not loop_id or not occurrence:
+            continue
+        if (loop_id, occurrence) in known:
+            continue  # the backfill beat us to it; one copy is enough
+        fresh = {"loop_id": loop_id, "occurrence": occurrence,
+                 "enqueued_at": item.get("enqueued_at")
+                 or _dt.datetime.now().isoformat(timespec="seconds"),
+                 "attempts": 0}
+        at = next((i for i, e in enumerate(entries)
+                   if str(e.get("loop_id")) == loop_id), len(entries))
+        entries.insert(at, fresh)
+        known.add((loop_id, occurrence))
+        requeued += 1
+    save(entries)
+    atomic_write_json(quarantine_path(), [])
+    return {"requeued": requeued, "cleared": len(q), "depth": len(entries)}
+
+
 def build_prompt(loop_id: str, occurrence: str, transcript: str,
                  out: Path | str) -> None:
     """Template + loop title + current thread + the ONE new occurrence.
@@ -293,6 +338,7 @@ def main() -> int:
     b.add_argument("--limit", type=int, default=20)
     b.add_argument("--out")
     sub.add_parser("backfill-enqueue")
+    sub.add_parser("requeue-quarantined")
     r = sub.add_parser("remove")
     r.add_argument("--loop", required=True)
     r.add_argument("--occurrence", required=True)
@@ -322,6 +368,12 @@ def main() -> int:
         print(json.dumps(out))
         log(f"thread-backfill enqueue: {out['enqueued']} occurrence(s) queued "
             f"across {out['loops']} threadless loop(s)", job="fold")
+    elif args.cmd == "requeue-quarantined":
+        out = requeue_quarantined()
+        print(json.dumps(out))
+        log(f"quarantine repair: {out['requeued']} entr(y/ies) re-enqueued "
+            f"with attempts cleared, {out['cleared']} cleared from "
+            f"fold-quarantine.json, queue depth {out['depth']}", job="fold")
     elif args.cmd == "remove":
         remove(args.loop, args.occurrence)
     elif args.cmd == "attempt":

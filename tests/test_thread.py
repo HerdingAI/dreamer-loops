@@ -434,6 +434,61 @@ class AttemptQuarantineTest(ThreadCase):
             FP.max_attempts()
         self.assertIn("thread.fold_max_attempts", str(cm.exception))
 
+    def test_requeue_clears_attempts_and_empties_the_quarantine(self) -> None:
+        """The repair fold-queue-current names. Quarantine records THAT a fold
+        hit its cap, never WHY: when the cause was the harness (2026-08-16 —
+        every quarantined entry's prompt exceeded the 128 KB execve argv cap,
+        so none reached the model), the spent attempts are the bug's, and
+        carrying them forward re-quarantines the entry before the first real
+        try."""
+        loop, occ = self._entry()
+        for _ in range(int(dc.CFG["thread"]["fold_max_attempts"]) + 1):
+            FP.record_attempt(loop.id, occ)
+        self.assertEqual(self.qids(), [])
+        out = FP.requeue_quarantined()
+        self.assertEqual((out["requeued"], out["cleared"]), (1, 1))
+        self.assertEqual(self.qids(),
+                         [{"loop_id": loop.id, "occurrence": occ}])
+        self.assertEqual(self.queue()[0]["attempts"], 0,
+                         "a repaired entry must start its retry budget over")
+        self.assertEqual(
+            dc.read_json(self.tmp / "meta" / "fold-quarantine.json",
+                         default=["not-empty"]), [],
+            "repaired entries must not stay in the quarantine as well")
+
+    def test_requeue_does_not_duplicate_what_the_backfill_re_enqueued(self)\
+            -> None:
+        """A still-threadless loop's occurrence comes back through
+        backfill-enqueue on its own; the repair must not add a second copy of
+        the same work."""
+        loop, occ = self._entry()
+        for _ in range(int(dc.CFG["thread"]["fold_max_attempts"]) + 1):
+            FP.record_attempt(loop.id, occ)
+        V.enqueue_fold_pending(loop.id, occ)
+        out = FP.requeue_quarantined()
+        self.assertEqual(out["requeued"], 0)
+        self.assertEqual(self.qids(),
+                         [{"loop_id": loop.id, "occurrence": occ}])
+
+    def test_requeued_entry_folds_before_that_loops_later_work(self) -> None:
+        """apply_thread appends trajectory lines in fold order and sorts
+        nothing, so a repaired entry — always the older work, since it is what
+        blocked the later ones — must re-enter AHEAD of them."""
+        older = self.transcript("2026-07-01", "older")
+        loop = V.create_loop("X", older, D("2026-07-01"))
+        for _ in range(int(dc.CFG["thread"]["fold_max_attempts"]) + 1):
+            FP.record_attempt(loop.id, older)
+        other = V.create_loop("Y", self.transcript("2026-07-02", "other"),
+                              D("2026-07-02"))
+        newer = self.transcript("2026-07-03", "newer")
+        V.add_occurrence(loop, newer, D("2026-07-03"))
+        FP.requeue_quarantined()
+        mine = [e["occurrence"] for e in self.queue()
+                if e["loop_id"] == loop.id]
+        self.assertEqual(mine, [older, newer])
+        self.assertIn(other.id, [e["loop_id"] for e in self.queue()],
+                      "another loop's queued work must survive the repair")
+
     def test_lint_names_the_quarantined_occurrence(self) -> None:
         loop, occ = self._entry()
         cap = int(dc.CFG["thread"]["fold_max_attempts"])
