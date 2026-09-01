@@ -489,6 +489,53 @@ class AttemptQuarantineTest(ThreadCase):
         self.assertIn(other.id, [e["loop_id"] for e in self.queue()],
                       "another loop's queued work must survive the repair")
 
+    def test_two_quarantined_entries_of_one_loop_keep_their_order(self)\
+            -> None:
+        """The pair case the single-entry test cannot see. apply_thread appends
+        trajectory lines in fold order and sorts nothing, so if the repair
+        re-enters a loop's two quarantined occurrences newest-first, the
+        thread is written out of chronology. Inserting each entry at a
+        recomputed 'first index for this loop' does exactly that, because the
+        second entry matches the one just inserted."""
+        older = self.transcript("2026-07-01", "older")
+        loop = V.create_loop("X", older, D("2026-07-01"))
+        middle = self.transcript("2026-07-02", "middle")
+        V.add_occurrence(loop, middle, D("2026-07-02"))
+        cap = int(dc.CFG["thread"]["fold_max_attempts"])
+        for occ in (older, middle):
+            for _ in range(cap + 1):
+                FP.record_attempt(loop.id, occ)
+        self.assertEqual(self.queue(), [])
+        newer = self.transcript("2026-07-03", "newer")
+        V.add_occurrence(loop, newer, D("2026-07-03"))
+        out = FP.requeue_quarantined()
+        self.assertEqual(out["requeued"], 2)
+        self.assertEqual([e["occurrence"] for e in self.queue()],
+                         [older, middle, newer],
+                         "a loop's requeued entries must stay oldest-first")
+
+    def test_malformed_quarantine_entry_is_kept_not_destroyed(self) -> None:
+        """An entry with no loop_id cannot be requeued, but wiping the
+        quarantine wholesale would delete it with no record — the same silent
+        loss the repair exists to undo. It stays, and says so."""
+        loop, occ = self._entry()
+        for _ in range(int(dc.CFG["thread"]["fold_max_attempts"]) + 1):
+            FP.record_attempt(loop.id, occ)
+        qfile = self.tmp / "meta" / "fold-quarantine.json"
+        q = dc.read_json(qfile, default=[])
+        q.append({"occurrence": "[[sources/transcripts/2026/07/x]]"})
+        dc.atomic_write_json(qfile, q)
+        out = FP.requeue_quarantined()
+        self.assertEqual((out["requeued"], out["malformed"]), (1, 1))
+        self.assertEqual(dc.read_json(qfile, default=[]),
+                         [{"occurrence": "[[sources/transcripts/2026/07/x]]"}],
+                         "a malformed entry must survive the repair")
+        self.assertTrue(
+            any("malformed" in (e.get("detail") or "")
+                or "unrepaired" in (e.get("detail") or "")
+                for e in self._events()),
+            "the retained entry must be reported, not silently left behind")
+
     def test_lint_names_the_quarantined_occurrence(self) -> None:
         loop, occ = self._entry()
         cap = int(dc.CFG["thread"]["fold_max_attempts"])

@@ -260,26 +260,37 @@ def requeue_quarantined() -> dict:
     Quarantine records THAT a fold failed its cap, never WHY. When the cause
     turns out to be the harness rather than the entry, those attempts were
     spent on a bug: carrying them forward re-quarantines the entry on its
-    first real try, before the LLM is ever called. That is exactly what
-    happened on 2026-08-16 — every one of the 20 quarantined entries had a
-    transcript over the 128 KB execve argv cap, so not one of them had ever
-    reached the model. Clearing the count is the honest state; an entry that
-    is genuinely broken simply re-earns its cap.
+    first real try, before the LLM is ever called. That is exactly what a
+    prompt over the 128 KB execve argv cap did — the entry never reached the
+    model at all. Clearing the count is the honest state; an entry that is
+    genuinely broken simply re-earns its cap.
 
     Within a loop, folds must stay oldest-first (apply_thread appends
-    trajectory lines in fold order and sorts nothing), so a requeued entry is
-    inserted BEFORE that loop's first queued entry — a quarantined entry
-    blocked the later ones, so it is always the older work. Entries the
-    backfill already re-enqueued are left alone rather than duplicated.
+    trajectory lines in fold order and sorts nothing), so a loop's requeued
+    entries go in as ONE contiguous block, in quarantine order, immediately
+    BEFORE that loop's first queued entry — a quarantined entry blocked the
+    later ones, so it is always the older work. Inserting per-entry with a
+    recomputed index would put the second entry ahead of the first and invert
+    the pair, which is why the block is spliced in one step.
+
+    Entries the backfill already re-enqueued are left alone rather than
+    duplicated. An entry too malformed to requeue (no loop_id or occurrence)
+    is KEPT in the quarantine and reported — clearing the file wholesale
+    would destroy it with no record, the same silent loss this repair exists
+    to undo.
     """
     q = read_json(quarantine_path(), default=[]) or []
     entries = load()
     known = {_identity(e) for e in entries}
+    fresh_by_loop: dict[str, list[dict]] = {}
+    loop_order: list[str] = []
+    malformed: list[dict] = []
     requeued = 0
     for item in q:
         loop_id = str(item.get("loop_id") or "")
         occurrence = str(item.get("occurrence") or "")
         if not loop_id or not occurrence:
+            malformed.append(item)
             continue
         if (loop_id, occurrence) in known:
             continue  # the backfill beat us to it; one copy is enough
@@ -287,14 +298,24 @@ def requeue_quarantined() -> dict:
                  "enqueued_at": item.get("enqueued_at")
                  or _dt.datetime.now().isoformat(timespec="seconds"),
                  "attempts": 0}
-        at = next((i for i, e in enumerate(entries)
-                   if str(e.get("loop_id")) == loop_id), len(entries))
-        entries.insert(at, fresh)
+        if loop_id not in fresh_by_loop:
+            fresh_by_loop[loop_id] = []
+            loop_order.append(loop_id)
+        fresh_by_loop[loop_id].append(fresh)
         known.add((loop_id, occurrence))
         requeued += 1
+    for loop_id in loop_order:
+        at = next((i for i, e in enumerate(entries)
+                   if str(e.get("loop_id")) == loop_id), len(entries))
+        entries[at:at] = fresh_by_loop[loop_id]
     save(entries)
-    atomic_write_json(quarantine_path(), [])
-    return {"requeued": requeued, "cleared": len(q), "depth": len(entries)}
+    atomic_write_json(quarantine_path(), malformed)
+    if malformed:
+        _degraded_event(
+            f"{len(malformed)} quarantine entr(y/ies) lack loop_id or "
+            f"occurrence and were left in fold-quarantine.json unrepaired")
+    return {"requeued": requeued, "cleared": len(q) - len(malformed),
+            "malformed": len(malformed), "depth": len(entries)}
 
 
 def build_prompt(loop_id: str, occurrence: str, transcript: str,
@@ -373,7 +394,8 @@ def main() -> int:
         print(json.dumps(out))
         log(f"quarantine repair: {out['requeued']} entr(y/ies) re-enqueued "
             f"with attempts cleared, {out['cleared']} cleared from "
-            f"fold-quarantine.json, queue depth {out['depth']}", job="fold")
+            f"fold-quarantine.json, {out['malformed']} left unrepaired "
+            f"(malformed), queue depth {out['depth']}", job="fold")
     elif args.cmd == "remove":
         remove(args.loop, args.occurrence)
     elif args.cmd == "attempt":
