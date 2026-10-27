@@ -334,6 +334,9 @@ def apply(loop_id: str, payload: dict) -> dict:
             G.stage("derived_citations", {"loop": loop.id,
                                           "path": loop.conclusion,
                                           "count": n_derived})
+            # The digest line is a report; the question is the exit (§5.6).
+            import questions as Q
+            Q.note_derived_claims(loop.id, loop.conclusion, n_derived)
         result = {"loop": loop.id, "route": route, "status": loop.status,
                   "conclusion": loop.conclusion, "problems": problems}
 

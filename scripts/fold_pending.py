@@ -111,6 +111,17 @@ def _degraded_event(detail: str) -> None:
                      lambda d: append_event_deduped(d, event))
 
 
+def _sync_questions() -> None:
+    """Keep the owner's question queue in step with the quarantine (§5.6).
+    Best-effort: a queue problem must not undo the quarantine itself."""
+    try:
+        import questions as Q
+        Q.sync_fold_quarantine()
+    except Exception as exc:  # noqa: BLE001
+        log(f"WARN could not sync fold quarantine to the question queue: {exc}",
+            job="fold")
+
+
 def record_attempt(loop_id: str, occurrence: str) -> dict:
     """Count one actual try (prompt built / LLM called) against the entry —
     on the same queue file the enqueue path writes, atomically.
@@ -147,6 +158,7 @@ def record_attempt(loop_id: str, occurrence: str) -> dict:
             f"uncovered occurrence until it is repaired and re-enqueued")
         log(f"QUARANTINED {loop_id} {occurrence} after {attempts - 1} failed "
             f"attempts", job="fold")
+        _sync_questions()
         return {"found": True, "quarantined": True, "attempts": attempts - 1}
     for e in matched:
         e["attempts"] = attempts
@@ -314,6 +326,7 @@ def requeue_quarantined() -> dict:
         _degraded_event(
             f"{len(malformed)} quarantine entr(y/ies) lack loop_id or "
             f"occurrence and were left in fold-quarantine.json unrepaired")
+    _sync_questions()
     return {"requeued": requeued, "cleared": len(q) - len(malformed),
             "malformed": len(malformed), "depth": len(entries)}
 

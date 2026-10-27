@@ -118,6 +118,22 @@ class PaddingTest(DigestCase):
                         f"first section opened empty: {body[:60]!r}")
 
 
+class ArchivingSoonTest(DigestCase):
+    def test_loops_sharing_a_decay_deadline_do_not_crash_the_build(self) -> None:
+        # Every backfilled loop decays from the same go-live floor, so equal
+        # deadlines are the normal case, not an edge: sorting (deadline, Loop)
+        # tuples fell through to comparing Loops and killed the whole digest.
+        V.create_loop("First old question?",
+                      self.transcript("2026-07-01", "a"), D("2026-07-01"))
+        V.create_loop("Second old question?",
+                      self.transcript("2026-07-02", "b"), D("2026-07-02"))
+        text = G.build(ref=D("2026-09-20")).read_text(encoding="utf-8")
+        self.assertIn("## Archiving soon", text)
+        self.assertLess(text.index("First old question?"),
+                        text.index("Second old question?"),
+                        "ties on deadline must order by loop id")
+
+
 class HealthBannerTest(DigestCase):
     def _health_state(self, checked_at: str, blocked=(), assertions=()) -> None:
         (self.tmp / "meta" / "run-state.json").write_text(

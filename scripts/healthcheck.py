@@ -52,6 +52,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from dreamer_common import (CFG, as_date, atomic_write_json, hours_since,  # noqa: E402
                             log, p, read_json, read_json_strict, read_page,
                             state_lock, today)
+import goals as G  # noqa: E402
+import questions as Q  # noqa: E402
+import vault as V  # noqa: E402
 
 SEVERITIES = ("info", "degraded", "blocking")
 
@@ -298,9 +301,18 @@ _AGE_HOURS = {"s": 1 / 3600, "m": 1 / 60, "h": 1.0, "d": 24.0,
 
 
 def _qmd_status_raw() -> str:
-    """The one subprocess call — read-only, isolated so tests can stub it."""
+    """The one subprocess call — read-only, isolated so tests can stub it.
+
+    cwd is pinned to the project root. qmd resolves its project and
+    collection set from the caller's working directory, and cron callers
+    invoke this script by absolute path without `cd`-ing into the project.
+    An unpinned call therefore reports on whatever (usually empty) index the
+    caller's directory resolves to, which surfaces as "qmd status output not
+    understood (no collection ages)" rather than as a stale vault index. See
+    tests/test_healthcheck.py QmdSubprocessCwdTest.
+    """
     out = subprocess.run(["qmd", "status"], capture_output=True, text=True,
-                         timeout=QMD_TIMEOUT_S)
+                         timeout=QMD_TIMEOUT_S, cwd=p("root"))
     if out.returncode != 0:
         raise RuntimeError(f"qmd status exited {out.returncode}: "
                            f"{(out.stderr or '').strip()[:200]}")
@@ -564,6 +576,160 @@ def assert_gates_current():
     return True, f"all {len(gates)} configured gate(s) recorded closed"
 
 
+def assert_goal_catalog_fresh():
+    goals = G.load_goals()
+    cat_path = G.goals_dir() / G.CATALOG
+    if not cat_path.exists():
+        if goals:
+            return False, "goals catalog missing on disk"
+        return True, "0 goals, catalog not needed yet"
+    try:
+        cfm, _ = read_page(cat_path)
+        count = int(cfm.get("count") or 0)
+        if count != len(goals):
+            return False, f"catalog count {count} != goals on disk {len(goals)}"
+        return True, f"catalog fresh ({count} goals)"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"unreadable goals catalog: {exc}"
+
+
+def assert_goal_cap_respected():
+    active = G.active_goals_count()
+    max_active = G.max_active_goals()
+    if active > max_active:
+        return False, f"{active} active goals exceed goals.max_active {max_active}"
+    return True, f"{active}/{max_active} active goals"
+
+
+def assert_goal_clocks_sane():
+    problems = []
+    goals = G.load_goals()
+    t = today()
+    for g in goals:
+        if g.last_mention and g.last_movement and g.last_movement > g.last_mention:
+            problems.append(f"{g.id}: last_movement ({g.last_movement}) > last_mention ({g.last_mention})")
+        if g.last_mention and g.last_mention > t:
+            problems.append(f"{g.id}: last_mention in future ({g.last_mention})")
+        if g.last_movement and g.last_movement > t:
+            problems.append(f"{g.id}: last_movement in future ({g.last_movement})")
+        if g.created:
+            if g.last_mention and g.last_mention < g.created:
+                problems.append(f"{g.id}: last_mention predates created")
+            if g.last_movement and g.last_movement < g.created:
+                problems.append(f"{g.id}: last_movement predates created")
+    if problems:
+        return False, "; ".join(problems)
+    return True, f"clocks sane across {len(goals)} goal(s)"
+
+
+def assert_goal_quiet_diff():
+    # Check that goals have consistent attachments and trajectory lines
+    goals = G.load_goals()
+    problems = []
+    for g in goals:
+        assessment = G.assessment_section(g.body or "")
+        if assessment:
+            traj = [ln for ln in assessment.splitlines() if re.match(r"^-\s*\d{4}-\d{2}-\d{2}", ln.strip())]
+            for ln in traj:
+                m = re.search(r"\[\[([^\]]+)\]\]", ln)
+                if m:
+                    wikilink = f"[[{m.group(1)}]]"
+                    if wikilink not in g.attachments:
+                        problems.append(f"{g.id}: trajectory cites {wikilink} not in attachments")
+    if problems:
+        return False, "; ".join(problems)
+    return True, f"quiet diff respected across {len(goals)} goal(s)"
+
+
+def assert_step_citations():
+    goals = G.load_goals()
+    problems = []
+    for g in goals:
+        plan_re = re.compile(r"^## Plan \(revision \d+\)\s*$(.*?)(?=^## |\Z)", re.M | re.S)
+        pm = plan_re.search(g.body)
+        if pm:
+            for step_line in pm.group(1).splitlines():
+                step_line = step_line.strip()
+                if re.match(r"^-\s*\[[xX]\]", step_line):
+                    m = G._DONE_STEP_RE.match(step_line)
+                    if not m or not m.group(3):
+                        problems.append(f"{g.id}: done step lacks citation: {step_line!r}")
+    if problems:
+        return False, "; ".join(problems)
+    return True, f"step citations valid across {len(goals)} goal(s)"
+
+
+def assert_owner_writes_verified():
+    writes = Q.load_owner_writes()
+    if not writes:
+        return True, "no owner writes recorded yet"
+
+    lag_days = float((CFG.get("mcp") or {}).get("owner_write_verify_lag_days", 3))
+    unverified = []
+
+    corpus = Q.human_corpus()
+    # A quarantined write whose question the owner has answered is settled:
+    # they ruled on it, so it must not alarm forever.
+    answered = {q.get("id") for q in Q.load_questions() if q.get("status") == "answered"}
+
+    verified_count = 0
+    for w in writes:
+        quote = (w.get("owner_quote") or "").strip()
+        if not quote:
+            continue
+        if w.get("verified") is True or Q.quote_in(quote, corpus):
+            verified_count += 1
+            continue
+        if w.get("verified") is False and w.get("question_id") in answered:
+            continue
+        age_h = hours_since(str(w.get("at") or ""))
+        if age_h is not None and age_h > lag_days * 24.0:
+            unverified.append(f"{w['id']} ({w.get('tool')}) quote={quote[:25]!r}")
+
+    if unverified:
+        return False, f"{len(unverified)} write(s) unverified past {lag_days:g}d lag: {', '.join(unverified)}"
+    return True, f"{verified_count}/{len(writes)} owner write(s) verified"
+
+
+def assert_open_questions_drained():
+    questions = Q.load_questions()
+    max_weeks = int((CFG.get("goals") or {}).get("silence_escalation_weeks", 3))
+    limit_days = max_weeks * 7.0
+    stale_questions = []
+
+    for q in questions:
+        if q.get("status") in ("pending", "asked"):
+            age_h = hours_since(str(q.get("created_at") or ""))
+            if age_h is not None and age_h > limit_days * 24.0:
+                stale_questions.append(f"{q['id']} ({q.get('kind')}) {age_h/24.0:.1f}d")
+
+    if stale_questions:
+        return False, f"{len(stale_questions)} question(s) pending past {max_weeks}w: {', '.join(stale_questions)}"
+    pending_count = sum(1 for q in questions if q.get("status") in ("pending", "asked"))
+    return True, f"{pending_count} open question(s) pending (all within {max_weeks}w window)"
+
+
+def assert_assessment_queue_depth():
+    entries = read_json(p("meta") / "fold-pending.json", default=[]) or []
+    depth = len(entries)
+    limit = int(thread_cfg("fold_queue_max"))
+    if depth > limit:
+        return False, f"assessment/fold queue depth {depth} exceeds {limit}"
+    return True, f"queue depth {depth} (max {limit})"
+
+
+def assert_no_numeric_progress():
+    goals = G.load_goals()
+    problems = []
+    for g in goals:
+        raw = g.path.read_text(encoding="utf-8") if g.path and g.path.exists() else g.body
+        if G._NUMERIC_PROGRESS_RE.search(raw):
+            problems.append(f"{g.id} contains numeric progress key")
+    if problems:
+        return False, "; ".join(problems)
+    return True, "no numeric progress keys in goal pages"
+
+
 register("embeddings-current", "degraded", (), assert_embeddings_current)
 register("index-fresh", "blocking", ("research",), assert_index_fresh)
 register("collections-covered", "degraded", (), assert_collections_covered)
@@ -571,6 +737,17 @@ register("vocabulary-applied", "degraded", (), assert_vocabulary_applied)
 register("cost-records-sane", "degraded", (), assert_cost_records_sane)
 register("fold-queue-current", "degraded", (), assert_fold_queue_current)
 register("gates-current", "info", (), assert_gates_current)
+
+# The Worried Friend assertions (§8.1)
+register("goal-catalog-fresh", "degraded", (), assert_goal_catalog_fresh)
+register("goal-cap-respected", "blocking", ("owner-write",), assert_goal_cap_respected)
+register("goal-clocks-sane", "degraded", (), assert_goal_clocks_sane)
+register("goal-quiet-diff", "degraded", (), assert_goal_quiet_diff)
+register("step-citations", "blocking", ("owner-write",), assert_step_citations)
+register("owner-writes-verified", "degraded", (), assert_owner_writes_verified)
+register("open-questions-drained", "degraded", (), assert_open_questions_drained)
+register("assessment-queue-depth", "degraded", (), assert_assessment_queue_depth)
+register("no-numeric-progress", "info", (), assert_no_numeric_progress)
 
 
 # --------------------------------------------------------------------------

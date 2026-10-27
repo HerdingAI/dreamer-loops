@@ -26,6 +26,8 @@ from dreamer_common import (  # noqa: E402
     CFG, as_date, atomic_write, atomic_write_json, hours_since, log, p,
     read_json, today, update_run_state,
 )
+import goals as G  # noqa: E402
+import questions as Q  # noqa: E402
 import vault as V  # noqa: E402
 
 MARK_RE = re.compile(r"^\s*-\s*\[(?P<mark>[ xX✓✗])\]\s*`(?P<key>[^`]+)`", re.M)
@@ -204,6 +206,97 @@ def health_lines() -> list[str]:
     return lines
 
 
+def render_friend_section(ref: _dt.date, pending: dict) -> tuple[str, list[str]]:
+    goals = G.load_goals()
+    active_goals = [g for g in goals if g.status == "active"]
+    lines = []
+
+    # 1. Movement
+    moved = [g for g in active_goals if g.last_movement and 0 <= (ref - g.last_movement).days <= 7]
+    lines.append("### Movement")
+    if moved:
+        for g in moved:
+            lines.append(f"- **{g.title}** (`{g.id}`) — movement on {g.last_movement.isoformat()}")
+    else:
+        lines.append("_No goals advanced this week._")
+    lines.append("")
+
+    # 2. Execution
+    stale_exec = [g for g in active_goals if G.stale_detector(g, ref=ref)]
+    lines.append("### Execution")
+    if stale_exec:
+        for g in stale_exec:
+            stale_days = (ref - g.last_movement).days if g.last_movement else 0
+            lines.append(f"- **{g.title}** (`{g.id}`) — {stale_days}d without movement (last mention {g.last_mention})")
+    else:
+        lines.append("_All active goals have fresh movement._")
+    lines.append("")
+
+    # 3. Plan
+    revised = [g for g in active_goals if g.plan_revision > 1]
+    lines.append("### Plan")
+    if revised:
+        for g in revised:
+            lines.append(f"- **{g.title}** (`{g.id}`) — current plan revision {g.plan_revision}")
+    else:
+        lines.append("_Plans stable._")
+    lines.append("")
+
+    # 4. Drift
+    drifts = G.drift_detector(ref=ref)
+    lines.append("### Drift")
+    if drifts:
+        lines.append("Unattached recurring loops with high relevance:")
+        for loop, score in drifts:
+            occ_sample = ", ".join(loop.occurrences[-2:]) if loop.occurrences else "none"
+            lines.append(f"- **`{loop.id}` {loop.title}** (recurrence {loop.recurrence_count}, score {score:.1f}) — `{occ_sample}`")
+    else:
+        lines.append("_No drifting loops detected._")
+    lines.append("")
+
+    # 5. Cost
+    cost_questions = [q for q in Q.load_questions() if q.get("kind") == "cost" and q.get("status") in ("pending", "asked")]
+    lines.append("### Cost")
+    if cost_questions:
+        for q in cost_questions:
+            lines.append(f"- {q.get('text')}")
+    else:
+        lines.append("_No wellbeing/cost concerns logged._")
+    lines.append("")
+
+    # 6. Convergence
+    lines.append("### Convergence")
+    if active_goals:
+        for g in active_goals:
+            target = f" (target: {g.target_date.isoformat()})" if g.target_date else ""
+            lines.append(f"- **{g.title}** (`{g.id}`){target} — Finish line: _{g.finish_line}_")
+    else:
+        lines.append("_No active goals committed._")
+    lines.append("")
+
+    # 7. Housekeeping
+    lines.append("### Housekeeping")
+    open_qs = Q.list_questions(status="unresolved", surface="review", ref=ref)
+    if open_qs:
+        lines.append("**Open questions awaiting response:**")
+        for q in open_qs:
+            lines.append(f"- `[{q['id']}]` ({q.get('kind')}): {q.get('text')}")
+        lines.append("")
+
+    writes = Q.load_owner_writes()
+    recent_writes = writes[-5:] if writes else []
+    if recent_writes:
+        lines.append("**Owner-writes spot-check:**")
+        lines.append("Tick `[x]` to confirm, leave blank, or mark `[✗]` if unprompted.")
+        for w in recent_writes:
+            v_mark = "✓" if w.get("verified") is True else ("✗" if w.get("verified") is False else "?")
+            lines.append(f"- [ ] `{w['id']}` — {w.get('tool')} `{w.get('target_id')}` quote: \"{w.get('owner_quote')}\" (verified: {v_mark})")
+    else:
+        lines.append("_No owner writes to review._")
+
+    return "The Friend", lines
+
+
 def build(ref: _dt.date | None = None, *, run_stats: dict | None = None,
           quiet_reason: str | None = None) -> Path:
     ref = ref or today()
@@ -268,6 +361,10 @@ def build(ref: _dt.date | None = None, *, run_stats: dict | None = None,
             if m.get("reason"):
                 lines.append(f"  - {m['reason']}")
     S.add("Merge proposals", lines)
+
+    # ---- The Worried Friend (§7.3) -------------------------------------
+    friend_title, friend_lines = render_friend_section(ref, pending)
+    S.add(friend_title, friend_lines)
 
     # ---- what the system did -------------------------------------------
     # Quality scores, keyed by loop, so a conclusion carries its own grade
@@ -334,7 +431,9 @@ def build(ref: _dt.date | None = None, *, run_stats: dict | None = None,
     if soon:
         lines.append("Say the word to revive any of these.")
         lines.append("")
-        for deadline, l in sorted(soon):
+        # Key on (deadline, id): backfilled loops share one go-live deadline,
+        # and a bare tuple sort would fall through to comparing Loop objects.
+        for deadline, l in sorted(soon, key=lambda item: (item[0], item[1].id)):
             lines.append(f"- `{l.id}` **{l.title}** — archives "
                          f"{deadline.isoformat()} ({(deadline - ref).days}d)")
     S.add("Archiving soon", lines)

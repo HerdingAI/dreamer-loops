@@ -22,8 +22,8 @@ from dreamer_common import (  # noqa: E402
     read_json, read_page, today, write_page,
 )
 
-STATUSES = {"open", "researching", "paused", "decision-only", "archived"}
-TERMINAL = {"paused", "decision-only"}
+STATUSES = {"open", "researching", "paused", "decision-only", "archived", "resolved"}
+TERMINAL = {"paused", "decision-only", "resolved"}
 CATALOG = "_catalog.md"
 
 _ID_RE = re.compile(r"^L(\d{4,})$")
@@ -276,17 +276,11 @@ def load_loops(include_archived: bool = False) -> list[Loop]:
     return out
 
 
-def load_loop(loop_id: str) -> Loop | None:
-    """One non-archived loop by id, or None — the single-loop equivalent of
-    `next((l for l in load_loops() if l.id == loop_id), None)` without the
-    directory scan.
-
-    save() keeps the filename == id invariant, so the page lives at
-    loops_dir()/<id>.md. The same exclusions as load_loops() apply: an
-    unreadable page, a page without an id, or a merge-redirect stub is not a
-    loop.
-    """
+def load_loop(loop_id: str, include_archived: bool = False) -> Loop | None:
+    """One loop by id (active, or archived if include_archived=True), or None."""
     path = loops_dir() / f"{loop_id}.md"
+    if not path.exists() and include_archived:
+        path = archive_dir() / f"{loop_id}.md"
     if not path.exists():
         return None
     try:
@@ -744,6 +738,45 @@ def _resolve_wikilink(ref: str) -> Path | None:
     for cand in base.rglob(f"{name}.md"):
         return cand
     return None
+
+
+LEGAL_LOOP_TRANSITIONS: dict[str, set[str]] = {
+    "open": {"open", "researching", "paused", "decision-only", "resolved", "archived"},
+    "researching": {"open", "researching", "paused", "decision-only", "resolved", "archived"},
+    "paused": {"open", "paused", "decision-only", "resolved", "archived"},
+    "decision-only": {"open", "decision-only", "resolved", "archived"},
+    "resolved": {"open", "resolved", "archived"},
+    "archived": {"open", "archived"},
+}
+
+
+def set_loop_status(loop: Loop, new_status: str) -> Loop:
+    """Validate and apply a loop status transition, managing file moves on archive/reopen."""
+    if new_status not in STATUSES:
+        raise ValueError(f"unknown loop status: {new_status!r}")
+    current = loop.status
+    allowed = LEGAL_LOOP_TRANSITIONS.get(current, set())
+    if new_status not in allowed:
+        raise ValueError(f"illegal loop status transition from {current!r} to {new_status!r}")
+
+    old_path = loop.path or (loops_dir() / f"{loop.id}.md")
+    loop.status = new_status
+
+    if new_status == "archived":
+        target_path = archive_dir() / f"{loop.id}.md"
+        loop.path = target_path
+        loop.save()
+        if old_path.exists() and old_path != target_path:
+            old_path.unlink()
+    else:
+        target_path = loops_dir() / f"{loop.id}.md"
+        loop.path = target_path
+        loop.save()
+        if old_path.exists() and old_path != target_path:
+            old_path.unlink()
+
+    regenerate_catalog()
+    return loop
 
 
 if __name__ == "__main__":

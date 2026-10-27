@@ -29,8 +29,12 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${NODE_BIN:+:$N
 # anyway so its summariser calls do not contend for the usage window.
 30 18 * * * flock -n /tmp/dreamer-ingest-cc.lock $ROOT/bin/ingest-cc.sh >> $ROOT/logs/ingest-cc.log 2>&1
 
-# Inbox extraction, ahead of the night window so it never contends with it.
-0 19 * * *  flock -n /tmp/dreamer-nightly.lock $ROOT/bin/nightly-extract.sh >> $ROOT/logs/nightly.log 2>&1
+# Inbox extraction, ahead of the night window so it never contends with it,
+# then the goal assessor. Chained on one line rather than given its own time:
+# drift is measured in loops, so the assessor must see tonight's extraction,
+# and a fixed offset would silently lose that order the night extraction runs
+# long. The assessor runs whether or not extraction succeeded.
+0 19 * * *  flock -n /tmp/dreamer-nightly.lock $ROOT/bin/nightly-extract.sh >> $ROOT/logs/nightly.log 2>&1; flock -n /tmp/dreamer-assess.lock $ROOT/bin/nightly-assess.sh >> $ROOT/logs/assess.log 2>&1
 
 # Decay stays weekly and must precede the dream (spec §6.9 orders Job 3 before
 # Job 2). With dreams running all night, "before" now means before the window

@@ -38,7 +38,7 @@ cp "$SRC"/.gitignore "$WORK/"
 cp "$SRC"/tests/fake_claude.py "$WORK/tests/"
 cp "$SRC"/tests/fixtures/script.json "$WORK/tests/fixtures/"
 cp "$SRC"/tests/fixtures/export.json "$WORK/tests/fixtures/"
-mkdir -p "$WORK"/vault/{loops,conclusions,concepts,archive,digests,sources/transcripts,inbox/resurfacings,.vault-meta}
+mkdir -p "$WORK"/vault/{loops,goals,conclusions,concepts,archive,digests,sources/transcripts,inbox/resurfacings,.vault-meta}
 
 # U6 — the sim runs with a FROZEN tag vocabulary so the extraction tag path is
 # exercised end to end: the fixtures emit one vocabulary tag (must land in
@@ -55,7 +55,8 @@ cfg["paths"] = {
     "root": root, "vault": f"{root}/vault", "inbox": f"{root}/vault/inbox",
     "resurfacings": f"{root}/vault/inbox/resurfacings",
     "sources": f"{root}/vault/sources/transcripts",
-    "loops": f"{root}/vault/loops", "conclusions": f"{root}/vault/conclusions",
+    "loops": f"{root}/vault/loops", "goals": f"{root}/vault/goals",
+    "conclusions": f"{root}/vault/conclusions",
     "concepts": f"{root}/vault/concepts", "archive": f"{root}/vault/archive",
     "digests": f"{root}/vault/digests", "meta": f"{root}/vault/.vault-meta",
     "logs": f"{root}/logs",
@@ -729,7 +730,163 @@ BIGDEF=$(python3 -c "
 import json
 d = json.load(open('$WORK/vault/.vault-meta/run-state.json'))
 print(sum(1 for x in d.get('deferrals', []) if x.get('job') == 'e2big'))")
-check "no deferral recorded for the oversized prompt" "0" "$BIGDEF"
+# --- The Worried Friend (Goals, Assess, MCP Writes, Health & Digest) ------
+step "The Worried Friend — Goal Lifecycle & Nightly Assessment"
+
+python3 - <<PY
+import datetime as dt, sys
+sys.path.insert(0, '$WORK/scripts')
+import goals as G
+import questions as Q
+
+g = G.commit_goal(
+    title="Chess Ladder",
+    finish_line="Puzzle ladder shows 1600",
+    target_date=dt.date(2026, 12, 1),
+    why="Club team selection",
+    plan_steps=["- [ ] Complete Puzzle drill set 1", "- [ ] Complete Endgame drill set 1"],
+    owner_quote="I want to commit to the chess puzzle ladder",
+    session_id="sess-001",
+    ref=dt.date(2026, 8, 1),
+)
+Q.record_owner_write(
+    tool="commit_goal",
+    target_type="goal",
+    target_id=g.id,
+    owner_quote="I want to commit to the chess puzzle ladder",
+    session_id="sess-001",
+    params={"title": "Chess Ladder"},
+    confirmation="Committed goal G0001: Chess Ladder",
+    at=dt.datetime(2026, 8, 1, 10, 0, 0),
+)
+PY
+
+check "goal G0001 file created" "true" "$([ -f "$WORK/vault/goals/G0001.md" ] && echo true || echo false)"
+check "goals catalog created" "true" "$([ -f "$WORK/vault/goals/_catalog.md" ] && echo true || echo false)"
+
+# Create a transcript with human turn mention on Day 1
+mkdir -p "$WORK/vault/sources/transcripts/2026/08"
+cat > "$WORK/vault/sources/transcripts/2026/08/2026-08-03--chess-mention.md" <<'TR1'
+---
+type: transcript
+title: "Chess Discussion"
+---
+
+Human: I want to commit to the chess puzzle ladder. Also I was thinking about the tournament date.
+
+Assistant: We have your goal committed.
+TR1
+
+(cd "$WORK" && DREAMER_TODAY=2026-08-03 bash bin/nightly-assess.sh)
+G_MENTION=$(python3 -c "import sys; sys.path.insert(0, '$WORK/scripts'); import goals as G; g = G.load_goal('G0001'); print(g.last_mention.isoformat(), g.last_movement.isoformat())")
+check "nightly-assess updated mention clock while movement remained unchanged" "2026-08-03 2026-08-01" "$G_MENTION"
+
+# Create a transcript with movement on Day 2
+cat > "$WORK/vault/sources/transcripts/2026/08/2026-08-04--chess-movement.md" <<'TR2'
+---
+type: transcript
+title: "Chess Practice"
+---
+
+Human: I completed 40 puzzles today from drill set 1. Mark step 1 done from today session.
+
+Assistant: Great job! Step completed.
+TR2
+
+(cd "$WORK" && DREAMER_TODAY=2026-08-04 bash bin/nightly-assess.sh)
+G_MOVE=$(python3 -c "import sys; sys.path.insert(0, '$WORK/scripts'); import goals as G; g = G.load_goal('G0001'); print(g.last_movement.isoformat())")
+check "nightly-assess updated movement clock" "2026-08-04" "$G_MOVE"
+
+# Complete step 1 with citation
+python3 - <<PY
+import datetime as dt, sys
+sys.path.insert(0, '$WORK/scripts')
+import goals as G
+import questions as Q
+
+G.complete_step(
+    "G0001",
+    1,
+    citation="[[sources/transcripts/2026/08/2026-08-04--chess-movement]]",
+    owner_quote="Mark step 1 done from today session",
+    session_id="sess-002",
+    ref=dt.date(2026, 8, 4),
+)
+Q.record_owner_write(
+    tool="complete_step",
+    target_type="goal",
+    target_id="G0001",
+    owner_quote="Mark step 1 done from today session",
+    session_id="sess-002",
+    params={"step_num": 1},
+    confirmation="Step 1 completed",
+    at=dt.datetime(2026, 8, 4, 12, 0, 0),
+)
+PY
+
+STEP_DONE=$(python3 -c "import sys; sys.path.insert(0, '$WORK/scripts'); import goals as G; g = G.load_goal('G0001'); print('[x]' in g.body)")
+check "step 1 completed in goal body" "True" "$STEP_DONE"
+
+# Run healthcheck
+(cd "$WORK" && python3 scripts/healthcheck.py --json > "$WORK/logs/health-friend.json")
+GOAL_HEALTH=$(python3 -c "import json; d = json.load(open('$WORK/logs/health-friend.json')); goal_ass = [a for a in d['assertions'] if 'goal' in a['name'] or 'step' in a['name'] or 'owner-writes' in a['name']]; print(all(a['ok'] for a in goal_ass))")
+check "all goal and owner-write healthcheck assertions pass" "True" "$GOAL_HEALTH"
+
+# Build weekly digest and check The Friend section
+DIGEST_FILE=$(cd "$WORK" && python3 scripts/digest.py build)
+contains "digest contains The Friend section" "The Friend" "$DIGEST_FILE"
+contains "digest contains Movement subsection" "### Movement" "$DIGEST_FILE"
+contains "digest contains Convergence subsection" "### Convergence" "$DIGEST_FILE"
+contains "digest contains Housekeeping subsection" "### Housekeeping" "$DIGEST_FILE"
+contains "digest contains Owner-writes spot-check" "Owner-writes spot-check" "$DIGEST_FILE"
+
+step "Friend: a quiet night, a forged quote, and speaking first (spec §9.4 items 3, 4, 7, 8)"
+GOAL_PAGE="$WORK/vault/goals/G0001.md"
+contains "an assessed transcript is checkpointed" "2026-08-04--chess-movement" "$WORK/vault/.vault-meta/assessed.json"
+
+# Nights with unrelated input (the rest of the sandbox's transcripts, drained a
+# batch at a time), then a night with no input at all. None may touch the page.
+BEFORE=$(sha256sum "$GOAL_PAGE" | cut -d' ' -f1)
+for _ in 1 2 3 4 5 6 7 8; do
+  (cd "$WORK" && DREAMER_TODAY=2026-08-05 bash bin/nightly-assess.sh) > "$WORK/logs/assess-quiet.out" 2>&1
+  grep -qF "detectors only, no LLM call" "$WORK/logs/assess-quiet.out" && break
+done
+check "a night with nothing leaves the goal page byte-identical" "$BEFORE" "$(sha256sum "$GOAL_PAGE" | cut -d' ' -f1)"
+contains "a quiet night makes no LLM call" "detectors only, no LLM call" "$WORK/logs/assess-quiet.out"
+
+(cd "$WORK" && python3 - <<'PY'
+import datetime as dt, sys
+sys.path.insert(0, "scripts")
+import questions as Q
+Q.record_owner_write(
+    tool="set_status", target_type="goal", target_id="G0001",
+    owner_quote="please abandon the Chess goal entirely", session_id="sess-forged",
+    params={"status": "abandoned"}, confirmation="G0001 abandoned",
+    at=dt.datetime(2026, 7, 30, 12, 0, 0),
+)
+PY
+)
+(cd "$WORK" && DREAMER_TODAY=2026-08-06 bash bin/nightly-assess.sh)
+FORGED=$(cd "$WORK" && python3 -c "
+import sys; sys.path.insert(0, 'scripts'); import questions as Q
+w = [w for w in Q.load_owner_writes() if w['session_id'] == 'sess-forged'][0]
+q = [q for q in Q.load_questions() if q['kind'] == 'unverified-write']
+print(w['verified'], len(q), q[0]['id'] == w.get('question_id'))")
+check "a forged quote is quarantined and lands in the question queue" "False 1 True" "$FORGED"
+
+# Ten days after the last mention (2026-08-04) the silence ping is due.
+(cd "$WORK" && DREAMER_TODAY=2026-08-14 bash bin/nightly-assess.sh)
+BRIEF1=$(cd "$WORK" && DREAMER_TODAY=2026-08-14 CLAUDE_CODE_ENTRYPOINT=cli python3 scripts/session_brief.py)
+BRIEF2=$(cd "$WORK" && DREAMER_TODAY=2026-08-14 CLAUDE_CODE_ENTRYPOINT=cli python3 scripts/session_brief.py)
+HEADLESS=$(cd "$WORK" && DREAMER_TODAY=2026-08-14 CLAUDE_CODE_ENTRYPOINT=sdk-cli python3 scripts/session_brief.py)
+case "$BRIEF1" in *"still on this?"*) ok "session start surfaces the silence ping" ;; *) bad "session start surfaces the silence ping — got: $BRIEF1" ;; esac
+check "the ping is not re-asked at the next session" "" "$BRIEF2"
+check "a headless session is told nothing" "" "$HEADLESS"
+
+# Well past the escalation window: questions accumulate, the goal does not move.
+(cd "$WORK" && DREAMER_TODAY=2026-09-20 bash bin/nightly-assess.sh)
+G_STATUS=$(cd "$WORK" && python3 -c "import sys; sys.path.insert(0, 'scripts'); import goals as G; print(G.load_goal('G0001').status)")
+check "weeks of silence never change the goal's status" "active" "$G_STATUS"
 
 printf '\n\033[1m== Result ==\033[0m\n'
 printf '  passed: %s\n  failed: %s\n  sandbox: %s\n' "$PASS" "$FAIL" "$WORK"

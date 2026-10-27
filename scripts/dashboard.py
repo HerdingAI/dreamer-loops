@@ -35,6 +35,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import dreamer_common as C  # noqa: E402
+import goals as G  # noqa: E402
+import questions as Q  # noqa: E402
 import vault as V  # noqa: E402
 
 try:
@@ -210,9 +212,40 @@ def collect() -> dict:
     go_live = C.go_live_date()
     decay_weeks = ((cfg.get("decay") or {}).get("decay_weeks"))
 
+    goals = G.load_goals()
+    active_goals = [g for g in goals if g.status == "active"]
+    goal_statuses = collections.Counter(g.status for g in goals)
+    silence_count = sum(1 for g in active_goals if G.silence_detector(g, today))
+    stale_count = sum(1 for g in active_goals if G.stale_detector(g, today))
+    drift_loops = G.drift_detector(today)
+    open_questions = Q.list_questions(status="unresolved", surface="all", ref=today)
+
     return {
         "generated_at": _dt.datetime.now().isoformat(timespec="seconds"),
         "today": today.isoformat(),
+        "goals": {
+            "total": len(goals),
+            "active": len(active_goals),
+            "max_active": G.max_active_goals(),
+            "statuses": dict(goal_statuses),
+            "silence_count": silence_count,
+            "stale_count": stale_count,
+            "drift_count": len(drift_loops),
+            "open_questions": len(open_questions),
+            "active_list": [
+                {
+                    "id": g.id,
+                    "title": g.title,
+                    "finish_line": g.finish_line,
+                    "target_date": g.target_date.isoformat() if g.target_date else None,
+                    "last_mention": g.last_mention.isoformat() if g.last_mention else None,
+                    "last_movement": g.last_movement.isoformat() if g.last_movement else None,
+                    "silence": G.silence_detector(g, today),
+                    "stale": G.stale_detector(g, today),
+                }
+                for g in active_goals
+            ],
+        },
         "loops": {
             "total": len(loops),
             "archived": n_archived,
@@ -352,6 +385,19 @@ def render(d: dict) -> str:
                   "A deferral is an honest stop, not a failure — work resumes "
                   "on the next scheduled run."))
 
+    G_data = d.get("goals") or {}
+    g_act = G_data.get("active", 0)
+    g_max = G_data.get("max_active", 4)
+    g_sil = G_data.get("silence_count", 0)
+    g_stale = G_data.get("stale_count", 0)
+    g_kind = "crit" if (g_sil or g_stale) else "good"
+    g_txt = f"{g_act}/{g_max} active"
+    if g_sil or g_stale:
+        g_txt += f" ({g_sil} silence, {g_stale} stale)"
+    cells.append(("Committed Goals", g_kind, g_txt,
+                  f"{G_data.get('total', 0)} tracked, {G_data.get('open_questions', 0)} open question(s), "
+                  f"{G_data.get('drift_count', 0)} drifting loop(s)."))
+
     status_html = "".join(
         f'<div class="status-cell"><div class="label">{_e(lbl)}</div>{_pill(k, txt)}'
         f'<div class="detail">{_e(det)}</div></div>'
@@ -375,6 +421,26 @@ def render(d: dict) -> str:
     # --- tags -------------------------------------------------------------
     tags_html = "".join(f'<span class="tag">{_e(t)}<em>{n}</em></span>'
                         for t, n in d["tags"]) or '<p class="empty">No approved tags in use yet.</p>'
+
+    # --- goals cards ------------------------------------------------------
+    g_cards = []
+    for g in G_data.get("active_list", []):
+        badges = []
+        if g.get("silence"):
+            badges.append('<span class="pill crit">silence ping</span>')
+        if g.get("stale"):
+            badges.append('<span class="pill warn">stale movement</span>')
+        badge_str = " ".join(badges)
+        target_str = f" · target: {_e(g.get('target_date') or '')}" if g.get("target_date") else ""
+        g_cards.append(
+            f'<div style="background:var(--card-bg);border:1px solid var(--border);border-radius:6px;padding:1rem;margin-bottom:0.8rem">'
+            f'<div style="display:flex;justify-content:space-between;align-items:center">'
+            f'<strong><code>{_e(g["id"])}</code> {_e(g["title"])}</strong>{badge_str}</div>'
+            f'<p style="margin:0.4rem 0 0;font-size:0.9rem;color:var(--dim)">Finish line: <em>{_e(g["finish_line"])}</em>{target_str}</p>'
+            f'<p style="margin:0.2rem 0 0;font-size:0.8rem;color:var(--dim)">Last mention: {_e(g.get("last_mention") or "none")} · Last movement: {_e(g.get("last_movement") or "none")}</p>'
+            f'</div>'
+        )
+    goals_cards_html = "".join(g_cards) or '<p class="empty">No active goals currently committed.</p>'
 
     # --- conclusion quality ----------------------------------------------
     scores = CN["scores"]
@@ -566,6 +632,21 @@ footer code{{font-family:var(--mono);background:var(--accent-soft);color:var(--a
 </header>
 
 <div class="status-strip">{status_html}</div>
+
+<section>
+  <h2>Committed Goals (The Worried Friend)</h2>
+  <p class="section-note">Active finish lines and intention tracking. Maximum {G_data.get('max_active', 4)} active goals.</p>
+  <div class="card-grid">
+    <div class="card"><div class="num">{G_data.get('active', 0)}<small>/{G_data.get('max_active', 4)}</small></div><div class="cap">active goals</div></div>
+    <div class="card"><div class="num">{G_data.get('silence_count', 0)}</div><div class="cap">silence pings</div></div>
+    <div class="card"><div class="num">{G_data.get('stale_count', 0)}</div><div class="cap">stale movement</div></div>
+    <div class="card"><div class="num">{G_data.get('drift_count', 0)}</div><div class="cap">drifting loops</div></div>
+    <div class="card"><div class="num">{G_data.get('open_questions', 0)}</div><div class="cap">open questions</div></div>
+  </div>
+  <div style="margin-top:1.2rem">
+    {goals_cards_html}
+  </div>
+</section>
 
 <section>
   <h2>Loop population</h2>
