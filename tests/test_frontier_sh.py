@@ -122,6 +122,12 @@ class FrontierShTest(Base):
         self.run_job({"frontier_sync:push": {"out": {"status": "ok", "conflicts_new": ["K7001-1"], "rejected": []}}})
         self.assertIn("1 conflict(s)", [e["detail"] for e in self.events()][0])
 
+    def test_a_reused_tap_id_is_degraded(self):
+        self.run_job({"frontier_sync:pull": {"out": {"status": "ok", "taps_reused": [
+            {"id": 5, "lesson": "K7001-1", "reason": "the show reused tap id"}]}}})
+        self.assertEqual([e["detail"] for e in self.events() if e["job"] == "frontier"],
+                         ["frontier pull: 1 reused tap id(s)"])
+
     def test_a_routine_lesson_skip_is_quiet_and_a_cost_ceiling_skip_is_reported(self):
         """Skipping a lesson whose goal paused or whose item moved is the queue working, not a
         fault (one that ran out of attempts records its own event). Rule 9: a run that skips

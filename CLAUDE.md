@@ -442,7 +442,9 @@ whatever app the owner configures under `frontier.show_url`, off by default).
    and fails per item, never per run.
 6. **Taps.** A "Got it" or "Dig deeper", from the consumer or through Claude, is
    applied once; only an owner write undoes it. Every quadrant change
-   records its cause.
+   records its cause. A tap id the lesson already records with another kind or time is a
+   reused show id: reported (`taps_reused`), never applied. An operator stops an unaired
+   lesson with `frontier_sync.py withdraw <lesson> --cause "…"`.
 7. **No numbers.** The map page and any display show no counts, ratios or scores
    (rule 16.6 extended).
 

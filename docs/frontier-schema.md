@@ -146,7 +146,10 @@ show never calls Dreamer. Nothing is sent while `frontier.show_url` is empty.
 |---|---|
 | `GET /lessons/status?after=<n>` | Reply `{"lessons": [{"id", "aired", "assigned_date", "episode_status"}], "taps": [{"id", "lesson_id", "kind", "at", "resolved"}]}`. `episode_status` of `skipped` or `bad` fails the lesson; taps with an id above `after` are returned, `kind` is `got_it` or `dig_deeper`, `at` is UTC |
 | `POST /lessons` | Body `{"id", "kind", "title", "body", "sources", "released_at"}`. Answer `2xx` to store it. Answer `409` with `{"detail": {"stored_sha256": "..."}}` when a different body is stored under that id (the lesson text is frozen once released) |
+| `POST /lessons/<id>/withdraw` | Body `{"reason": "..."}`. Sent once by `frontier_sync.py withdraw` for a released lesson that has not aired. Answer `2xx` once the lesson is removed from anything not yet presented. Answer `404` when the show never stored it; Dreamer then fails the lesson locally and notes it. Answer `409` with `{"detail": {"assigned_date": "YYYY-MM-DD"}}` when the lesson is already part of a presentation; Dreamer leaves it released and reports the date. Any other status leaves the lesson released and is reported, so the operator can retry |
 | `POST /known` | Body `{"titles": ["..."]}`: the titles the owner already knows, replacing the previous list |
 
-Any other `4xx` rejects that lesson for good. `5xx` and network errors are
+On `GET /lessons/status`, a tap whose `id` Dreamer already recorded on that lesson with a different `kind` or `at` is treated as an id the show handed out twice: it is reported as `taps_reused` and not applied. Tap ids must therefore be unique and stable.
+
+Any other `4xx` on `POST /lessons` rejects that lesson for good. `5xx` and network errors are
 retried on the next run.

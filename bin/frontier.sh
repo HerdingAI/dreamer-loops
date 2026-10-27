@@ -50,6 +50,8 @@ if step in ("pull", "push"):
     st = d.get("status", "")
     if st not in ("ok", "not configured", "disabled"):
         bad(st or "no status")
+    elif step == "pull" and d.get("taps_reused"):
+        bad("%d reused tap id(s)" % len(d["taps_reused"]))
     elif step == "push" and (d.get("conflicts_new") or d.get("rejected")):
         bad("%d conflict(s), %d rejected lesson(s)" % (len(d.get("conflicts_new") or []), len(d.get("rejected") or [])))
     else:
