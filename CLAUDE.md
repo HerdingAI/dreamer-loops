@@ -10,12 +10,13 @@ Constants live in `config.yaml`. Never hardcode a value this file names.
 
 ## 1. Schema and state machine
 
+### Loops (`vault/loops/<id>.md`)
 Every loop is one Markdown page in `vault/loops/<id>.md` with this frontmatter:
 
 ```yaml
 type: loop
 id: L0042                 # assigned by scripts/vault.py — never invent one
-status: open              # open | researching | paused | decision-only | archived
+status: open              # open | researching | paused | decision-only | resolved | archived
 title: "Short canonical statement of the loop"
 created: 2026-08-03
 first_seen: 2024-11-02    # earliest occurrence (may be historical)
@@ -31,29 +32,38 @@ tags: [architecture]      # controlled vocabulary ONLY — see rule 4
 The page body also carries one `## Thread (derived — hypothesis, not
 evidence)` section: the loop's latest synthesized state (rule 15).
 
-Legal transitions. Any other transition is a bug; refuse it and log.
+Legal loop transitions. Any other transition is a bug; refuse it and log.
 
 | From | To | Trigger |
 |---|---|---|
 | *(new)* | `open` | Extraction finds an unresolved thread matching no existing loop |
 | `open` | `open` | New transcript matches → append occurrence, bump `last_seen`, refresh the thread |
-| `paused` / `decision-only` / `archived` | `open` | Topic resurfaces (reopening rule) |
+| `paused` / `decision-only` / `resolved` / `archived` | `open` | Topic resurfaces (reopening rule) |
 | `open` | `researching` | Weekly dream selects it |
 | `researching` | `paused` | Conclusion written and linked |
 | `open` / `researching` | `decision-only` | Router: only an owner decision resolves it |
+| `open` | `resolved` | Owner explicitly resolves the loop |
 | `open` | `archived` | Decay, `DECAY_WEEKS` |
-| `paused` / `decision-only` | `archived` | Decay, `DECAY_WEEKS × terminal_multiplier` |
+| `paused` / `decision-only` / `resolved` | `archived` | Decay, `DECAY_WEEKS × terminal_multiplier` |
 
 Tracking begins on the **first** occurrence. The `recurrence_min` threshold
 governs *research eligibility*, not whether a loop exists.
 
-## 2. Pause rule
+### Goals (`vault/goals/<id>.md`)
+Every goal is one Markdown page in `vault/goals/<id>.md` (sibling object to loops, rule 16):
+- Statuses: `active` | `paused` | `achieved` | `abandoned`
+- Cap: at most `goals.max_active` (default 4) goals may be `active`.
+
+## 2. Pause and quiet-diff rule
 
 Never reopen, re-research, or modify a `paused` or `decision-only` loop unless
 tonight's transcripts — or a logged live resurfacing — **semantically match its
 topic**. A paused loop must show a zero diff on a night of unrelated input.
 
-Do not open a paused loop's page merely to check. The catalog line is enough to
+Similarly, a goal page must show a zero diff on a night with zero attachments to that
+goal (`goal-quiet-diff` healthcheck assertion).
+
+Do not open a paused loop's page or an inactive goal's page merely to check. The catalog line is enough to
 decide there is no candidate match (rule 11).
 
 ## 3. Decay rule
@@ -199,7 +209,7 @@ Concretely:
 
 ## 11. Catalog first
 
-Read `vault/loops/_catalog.md` before opening any loop page, and open full pages
+Read `vault/loops/_catalog.md` and `vault/goals/_catalog.md` before opening any loop or goal page, and open full pages
 only on candidate hits.
 
 This is an imperative, not a suggestion. The ablation this design is based on
@@ -231,8 +241,8 @@ Three trust tiers:
 - **Primary** — the owner's own words (Human turns in transcripts), the wisdom
   corpus, and web sources handled under rule 10.
 - **Derived** — anything Dreamer generated: conclusion pages, loop-page prose,
-  resurfacing notes, and **Assistant turns in transcripts**. An assistant reply
-  that restates a Dreamer conclusion is not the owner's reasoning, however the
+  goal assessment sections, resurfacing notes, and **Assistant turns in transcripts**. An assistant reply
+  that restates a Dreamer conclusion or goal status is not the owner's reasoning, however the
   transcript files it.
 - **Untrusted** — web content (rule 10, unchanged).
 
@@ -240,7 +250,7 @@ Consequences:
 
 - `accepted` and `provisional` grades require a primary citation: a transcript
   wikilink anchored to a Human turn, a qmd wisdom reference, or a URL. A
-  `[[conclusions/...]]`, `[[loops/...]]`, or `[[sources/resurfacings/...]]`
+  `[[conclusions/...]]`, `[[loops/...]]`, `[[goals/...]]`, or `[[sources/resurfacings/...]]`
   citation is derived and caps the claim at `contested`;
   `scripts/apply_conclusion.py` enforces this and quarantines such claims under
   a "Prior conclusions (derived)" heading.
@@ -278,15 +288,16 @@ dream prompt makes the semantic serve/re-research call and may return
 Re-processing must stay linear in *new input*, never proportional to the size
 of what Dreamer has already written.
 
-## 15. Living thread
+## 15. Living thread and assessment
 
 Each loop body keeps one `## Thread (derived — hypothesis, not evidence)`
+section, and each goal body keeps one `## Assessment (derived — hypothesis, not evidence)`
 section: a `**Now**` paragraph and an append-only `**Trajectory**` list. The
-thread is derived tier — rule 13 applies in full, and a citation carrying the
+thread/assessment is derived tier — rule 13 applies in full, and a citation carrying the
 `via thread` marker grades derived. It refreshes **only** on a matching
-transcript occurrence (rule 2: zero diff on nights of unrelated input), and a
-fold's input is the current thread plus the ONE new occurrence — never the
-loop's accumulated history (rule 14). Every future repair of a defect in the
+transcript occurrence/attachment (rule 2: zero diff on nights of unrelated input), and a
+fold's input is the current thread plus the ONE new occurrence/attachment — never the
+accumulated history (rule 14). Every future repair of a defect in the
 state relationships this rule touches ships with a matching healthcheck
 assertion or lint invariant (the R24 growth discipline).
 
@@ -303,6 +314,30 @@ One-time initialization carve-out: the thread and tag backfills
 `decision-only` pages once, at feature initialization — without it the
 backfill's value dies against rule 2, the same tension rule 3's GO_LIVE floor
 resolves for decay; rule 2 binds every night thereafter.
+
+## 16. Owner writes (The Worried Friend)
+
+1. **Sibling Objects**: Goals (`vault/goals/Gxxxx.md`) track committed intentions, finish
+   lines, and stakes. Loops (`vault/loops/Lxxxx.md`) track recurring open curiosity. Neither
+   can be converted into the other.
+2. **Authorization via Quote**: The MCP write channel enforces that all state mutations
+   (commit_goal, set_status, revise_plan, complete_step) MUST carry a verbatim quote from
+   the current conversation (`owner_quote`, minimum `mcp.owner_write_quote_min_chars` characters)
+   and a `session_id`. An assistant cannot invent, infer, or hallucinate owner consent.
+3. **AST Boundary Invariant**: MCP tool handlers must never write directly to disk with raw file
+   I/O; all vault mutations MUST flow through the domain modules (`goals.py`, `vault.py`, `questions.py`).
+4. **Ledger & Verification**: Every write is recorded to `vault/.vault-meta/owner-writes.json`.
+   The healthcheck verifies past writes against ingested transcript Human turns. Unverified writes
+   past `owner_write_verify_lag_days` trigger healthcheck degraded assertions.
+   A write still unmatched past the lag is quarantined (`verified: false`), never reverted, and
+   enqueued as an `unverified-write` question. **No quarantine without an owner-facing exit.**
+5. **Verified Attachments**: The assessor attaches a transcript to a goal only when the
+   attachment's anchor quote appears in a Human turn of that transcript; the attachment is dated
+   from the transcript, never from model output. On uncertainty, do not attach — a false
+   attachment resets a clock and silences a ping.
+6. **No Numeric Progress**: Goal pages track qualitative progress via plan step checklists and
+   derived assessment narratives. Numeric progress percentages, point scores, or completion gauges
+   are strictly forbidden (`no-numeric-progress` healthcheck invariant).
 
 ---
 

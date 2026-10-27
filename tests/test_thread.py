@@ -420,6 +420,20 @@ class AttemptQuarantineTest(ThreadCase):
         self.assertIn(loop.id, events[0]["detail"])
         self.assertIn(occ, events[0]["detail"])
 
+    def test_quarantine_reaches_the_owner_and_repair_settles_it(self) -> None:
+        # Spec §5.6: a quarantine is not a place things go to be forgotten.
+        import questions as Q
+        loop, occ = self._entry()
+        for _ in range(int(dc.CFG["thread"]["fold_max_attempts"]) + 1):
+            FP.record_attempt(loop.id, occ)
+        qs = [q for q in Q.load_questions() if q["kind"] == "fold-quarantine"]
+        self.assertEqual(len(qs), 1)
+        self.assertEqual(qs[0]["loop_id"], loop.id)
+        self.assertIn("requeue-quarantined", qs[0]["text"])
+
+        FP.requeue_quarantined()
+        self.assertEqual(Q.load_questions()[0]["status"], "answered")
+
     def test_batch_preserves_attempt_metadata(self) -> None:
         loop, occ = self._entry()
         FP.record_attempt(loop.id, occ)

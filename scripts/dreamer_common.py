@@ -124,7 +124,7 @@ def state_lock(lockfile: Path, timeout_s: float = 6.0, poll_s: float = 0.2):
     the block comment above for the DREAMER_LOCK_HELD re-entrancy contract.
     Raises TimeoutError when the lock cannot be had inside `timeout_s`."""
     if os.environ.get("DREAMER_LOCK_HELD"):
-        yield  # the calling job already holds wiki.lock on fd 9
+        yield  # the calling job or outer context already holds wiki.lock
         return
     lockfile.parent.mkdir(parents=True, exist_ok=True)
     fh = open(lockfile, "a")
@@ -140,7 +140,11 @@ def state_lock(lockfile: Path, timeout_s: float = 6.0, poll_s: float = 0.2):
                         f"could not acquire {lockfile} within {timeout_s}s "
                         f"(a job is running)")
                 time.sleep(poll_s)
-        yield
+        os.environ["DREAMER_LOCK_HELD"] = "1"
+        try:
+            yield
+        finally:
+            os.environ.pop("DREAMER_LOCK_HELD", None)
     finally:
         with contextlib.suppress(OSError):
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)

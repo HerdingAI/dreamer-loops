@@ -415,6 +415,33 @@ QMD_STATUS_MISSING_WISDOM = QMD_STATUS_FRESH.replace(
     Files:    42 (updated 2h ago)
 """, "")
 
+# Shaped like `qmd status` run from the wrong directory. qmd resolves its own
+# project/collections from the caller's cwd: from the wrong directory it
+# reports on a different (empty) index and prints no Collections section at
+# all. This is not an output-format change: the format is identical to
+# QMD_STATUS_SAMPLE/FRESH above, which parse cleanly.
+QMD_STATUS_WRONG_PROJECT = """\
+QMD Status
+
+Index: /home/user/.cache/qmd/index.sqlite
+Size:  96.0 KB
+
+Documents
+  Total:    0 files indexed
+  Vectors:  0 embedded
+
+AST Chunking
+  Status:   active
+  Languages: typescript, tsx, javascript, python, go, rust
+
+No collections. Run 'qmd collection add .' to index markdown files.
+
+Models
+  Embedding:   https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF
+  Reranking:   https://huggingface.co/ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF
+  Generation:  https://huggingface.co/tobil/qmd-query-expansion-1.7B-gguf
+"""
+
 
 def _row(name: str) -> tuple:
     for row in H.ASSERTIONS:
@@ -475,6 +502,70 @@ class QmdParserTest(LaunchCase):
             with self.assertRaises(ValueError) as cm:
                 fn(QMD_STATUS_MANGLED)
             self.assertIn("qmd status output not understood", str(cm.exception))
+
+    def test_wrong_project_output_is_rejected_not_silently_passed(self) -> None:
+        # The symptom when qmd answers for the wrong, empty project: no
+        # Collections section at all. The parser must keep refusing this exactly like
+        # the mangled case above; a "pass" here would be a vacuous check.
+        # embeddings-current still reads 0/0 (that line is unconditional).
+        with self.assertRaises(ValueError) as cm:
+            H.parse_collection_ages(QMD_STATUS_WRONG_PROJECT)
+        self.assertIn("no collection ages", str(cm.exception))
+        self.assertEqual(H.parse_pending_embeds(QMD_STATUS_WRONG_PROJECT), 0)
+
+
+# Fake `qmd` that reports its own cwd instead of doing anything real —
+# isolates the ONE thing under test: what directory the subprocess call runs
+# in. Mirrors the FAKE_QMD pattern in tests/test_reindex.py (a stub qmd first
+# on PATH, so no real qmd is reached).
+FAKE_QMD_REPORTS_CWD = "#!/usr/bin/env bash\npwd\n"
+
+
+class QmdSubprocessCwdTest(HealthCase):
+    """`_qmd_status_raw()` must pin the cwd of `qmd status`. qmd resolves its
+    own project/collections from the working directory, and a run started
+    from elsewhere (cron starts jobs outside the project) reports on a
+    different, empty index (QMD_STATUS_WRONG_PROJECT above). Without the pin
+    the subprocess inherits the caller's cwd.
+
+    The test starts from an unrelated directory and asserts qmd is reached
+    from the project root."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.stubbin = self.tmp / "stubbin"
+        self.stubbin.mkdir()
+        fake_qmd = self.stubbin / "qmd"
+        fake_qmd.write_text(FAKE_QMD_REPORTS_CWD, encoding="utf-8")
+        fake_qmd.chmod(0o755)
+        self._orig_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{self.stubbin}{os.pathsep}{self._orig_path}"
+        self._orig_cwd = os.getcwd()
+        self.elsewhere = Path(tempfile.mkdtemp(prefix="dreamer-elsewhere-"))
+        os.chdir(self.elsewhere)
+        H._QMD_CACHE.clear()
+
+    def tearDown(self) -> None:
+        os.chdir(self._orig_cwd)
+        shutil.rmtree(self.elsewhere, ignore_errors=True)
+        os.environ["PATH"] = self._orig_path
+        H._QMD_CACHE.clear()
+        super().tearDown()
+
+    def test_qmd_status_runs_in_the_project_root_not_the_callers_cwd(
+            self) -> None:
+        self.assertNotEqual(str(self.elsewhere), str(dc.p("root")),
+                            "test setup sanity: must actually be elsewhere")
+        out = H._qmd_status_raw()
+        self.assertEqual(out.strip(), str(dc.p("root")),
+                         "qmd was invoked from the caller's cwd "
+                         f"({self.elsewhere}) instead of the project root")
+
+    def test_qmd_status_text_is_also_pinned(self) -> None:
+        # Same guarantee through the cached public entry point every
+        # assertion actually calls.
+        out = H.qmd_status_text()
+        self.assertEqual(out.strip(), str(dc.p("root")))
 
 
 class EmbeddingsCurrentTest(LaunchCase):
@@ -859,6 +950,172 @@ class RunHealthcheckSmokeTest(HealthCase):
         self.assertIn("healthcheck exited non-zero", proc.stdout)
         self.assertIn("(smoke probe)", proc.stdout,
                       "the caller-supplied detail must reach the log line")
+
+
+class GoalHealthAssertionsTest(HealthCase):
+    def setUp(self) -> None:
+        super().setUp()
+        for n in ("goals", "loops", "sources", "conclusions"):
+            (self.tmp / n).mkdir(parents=True, exist_ok=True)
+            (self.tmp / "vault" / n).mkdir(parents=True, exist_ok=True)
+        self._orig_goals = dict(dc.CFG.get("goals", {}))
+        self._orig_mcp = dict(dc.CFG.get("mcp", {}))
+        dc.CFG["paths"].update({
+            "vault": str(self.tmp / "vault"),
+            "goals": str(self.tmp / "goals"),
+            "loops": str(self.tmp / "loops"),
+            "sources": str(self.tmp / "sources"),
+        })
+        dc.CFG["goals"].update({
+            "max_active": 4,
+            "silence_ping_days": 10,
+            "movement_stale_days": 21,
+            "drift_recurrence_min": 3,
+            "silence_escalation_weeks": 3,
+        })
+        dc.CFG["mcp"].update({
+            "owner_write_quote_min_chars": 8,
+            "owner_write_verify_lag_days": 3,
+        })
+
+    def tearDown(self) -> None:
+        dc.CFG.setdefault("goals", {}).clear(); dc.CFG["goals"].update(self._orig_goals)
+        dc.CFG.setdefault("mcp", {}).clear(); dc.CFG["mcp"].update(self._orig_mcp)
+        super().tearDown()
+
+    def test_goal_cap_respected_blocks_owner_write(self) -> None:
+        import goals as G
+        dc.CFG["goals"]["max_active"] = 1
+        g1 = G.commit_goal("G1", "F1", None, "W1", ["- [ ] S1"], "quote 1 here", "s1")
+        # Manually create a 2nd active goal without G.commit_goal (to bypass commit-time check)
+        g2 = G.Goal(id="G0002", title="G2", status="active", finish_line="F2", why="W2", body="# G2\n\n## Goal\n\nG2\n\n## Finish line\n\nF2\n\n## Why (stakes)\n\nW2\n\n## Plan (revision 1)\n\n- [ ] S\n")
+        g2.path = G.goals_dir() / "G0002.md"
+        g2.save()
+
+        record = H.run([_row("goal-cap-respected")])
+        self.assertFalse(record["assertions"][0]["ok"])
+        self.assertIn("owner-write", record["blocked_legs"])
+
+    def test_step_citations_blocks_owner_write(self) -> None:
+        import goals as G
+        g = G.commit_goal("G1", "F1", None, "W1", ["- [x] 2026-09-01 — Step one without citation"], "quote here 123", "s1")
+        record = H.run([_row("step-citations")])
+        self.assertFalse(record["assertions"][0]["ok"])
+        self.assertIn("owner-write", record["blocked_legs"])
+
+    def test_owner_writes_verified_against_transcripts(self) -> None:
+        import questions as Q
+        # Create transcript containing the quote in a human turn
+        tr_dir = self.tmp / "sources" / "2026" / "09"
+        tr_dir.mkdir(parents=True, exist_ok=True)
+        (tr_dir / "2026-09-02--test.md").write_text(
+            "Human: yes let us commit that goal right now\n\nAssistant: Done.",
+            encoding="utf-8"
+        )
+
+        # Record write with matching quote
+        w1 = Q.record_owner_write(
+            tool="commit_goal", target_type="goal", target_id="G0001",
+            owner_quote="yes let us commit that goal right now", session_id="s1",
+            params={}, confirmation="confirmed",
+        )
+
+        record = H.run([_row("owner-writes-verified")])
+        self.assertTrue(record["assertions"][0]["ok"])
+
+        Q.reconcile_owner_writes()
+        self.assertTrue(Q.load_owner_writes()[0]["verified"])
+
+    def test_adjudicated_unverified_write_stops_alarming(self) -> None:
+        # Quarantined, asked, answered: the owner has ruled on it, so the
+        # assertion must not stay red forever.
+        import questions as Q
+        old_time = _dt.datetime.now() - _dt.timedelta(days=4)
+        Q.record_owner_write(
+            tool="commit_goal", target_type="goal", target_id="G0001",
+            owner_quote="a quote that is in no transcript", session_id="s1",
+            params={}, confirmation="confirmed", at=old_time,
+        )
+        Q.reconcile_owner_writes()
+        record = H.run([_row("owner-writes-verified")])
+        self.assertFalse(record["assertions"][0]["ok"], "unanswered: still flagged")
+
+        Q.answer_question(Q.load_questions()[0]["id"], "yes that was me")
+        record = H.run([_row("owner-writes-verified")])
+        self.assertTrue(record["assertions"][0]["ok"])
+
+    def test_owner_writes_unverified_past_lag_blocks_leg(self) -> None:
+        import questions as Q
+        # Record write 4 days ago without transcript quote
+        old_time = _dt.datetime.now() - _dt.timedelta(days=4)
+        w1 = Q.record_owner_write(
+            tool="commit_goal", target_type="goal", target_id="G0001",
+            owner_quote="unverified hallucinated quote 123", session_id="s1",
+            params={}, confirmation="confirmed", at=old_time,
+        )
+
+        record = H.run([_row("owner-writes-verified")])
+        self.assertFalse(record["assertions"][0]["ok"])
+        self.assertIn("1 write(s) unverified", record["assertions"][0]["detail"])
+
+    def test_goal_catalog_fresh(self) -> None:
+        import goals as G
+        g1 = G.commit_goal("G1", "F1", None, "W1", ["- [ ] S1"], "quote 1 here", "s1")
+        # Overwrite catalog to be stale (empty)
+        (G.goals_dir() / "_catalog.md").write_text("# Catalog\n\n(no goals)\n", encoding="utf-8")
+        record = H.run([_row("goal-catalog-fresh")])
+        self.assertFalse(record["assertions"][0]["ok"])
+        self.assertIn("catalog count", record["assertions"][0]["detail"])
+
+        # Regenerate catalog and verify passes
+        G.regenerate_catalog()
+        record = H.run([_row("goal-catalog-fresh")])
+        self.assertTrue(record["assertions"][0]["ok"])
+
+    def test_goal_clocks_sane(self) -> None:
+        import goals as G
+        g1 = G.commit_goal("G1", "F1", None, "W1", ["- [ ] S1"], "quote 1 here", "s1")
+        g1.last_movement = _dt.date(2026, 9, 5)
+        g1.last_mention = _dt.date(2026, 9, 1)
+        g1.save()
+
+        record = H.run([_row("goal-clocks-sane")])
+        self.assertFalse(record["assertions"][0]["ok"])
+        self.assertIn("last_movement (2026-09-05) > last_mention", record["assertions"][0]["detail"])
+
+    def test_goal_quiet_diff(self) -> None:
+        import goals as G
+        g1 = G.commit_goal("G1", "F1", None, "W1", ["- [ ] S1"], "quote 1 here", "s1")
+        assessment_content = "**Now**\n\nOn track\n\n**Trajectory**\n\n- 2026-09-02 — Advanced [[sources/transcripts/2026/09/2026-09-02--fake]]"
+        g1.body = G.replace_assessment_section(g1.body, assessment_content)
+        g1.save()
+
+        record = H.run([_row("goal-quiet-diff")])
+        self.assertFalse(record["assertions"][0]["ok"])
+        self.assertIn("trajectory cites", record["assertions"][0]["detail"])
+
+    def test_open_questions_drained(self) -> None:
+        import questions as Q
+        old_time = _dt.datetime.now() - _dt.timedelta(days=25)
+        q = Q.enqueue_question("silence", "Are we still pursuing G1?", goal_id="G0001")
+        # Backdate created_at
+        questions = Q.load_questions()
+        questions[0]["created_at"] = old_time.isoformat()
+        Q.save_questions(questions)
+
+        record = H.run([_row("open-questions-drained")])
+        self.assertFalse(record["assertions"][0]["ok"])
+        self.assertIn("pending past 3w", record["assertions"][0]["detail"])
+
+    def test_no_numeric_progress(self) -> None:
+        import goals as G
+        g1 = G.commit_goal("G1", "F1", None, "W1", ["- [ ] S1"], "quote 1 here", "s1")
+        g1.body = g1.body.rstrip() + "\n\nProgress: 75% complete\n"
+        g1.save()
+
+        record = H.run([_row("no-numeric-progress")])
+        self.assertFalse(record["assertions"][0]["ok"])
+        self.assertIn("numeric progress", record["assertions"][0]["detail"])
 
 
 class LaunchConfigTest(LaunchCase):

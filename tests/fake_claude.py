@@ -211,12 +211,58 @@ def thread_fold_reply(prompt: str) -> dict | str:
             "trajectory_line": "returned to the question; still unresolved"}
 
 
+def assess_reply(prompt: str) -> dict:
+    attachments = []
+    observations = []
+    if "G0001" in prompt:
+        tr_links = re.findall(r"### (\[\[sources/transcripts/[^\]]+\]\])", prompt)
+        for tr in tr_links:
+            if "chess-movement" in tr:
+                attachments.append({
+                    "goal_id": "G0001",
+                    "transcript": tr,
+                    "kind": "movement",
+                    "date": "2026-08-04",
+                    "anchor": "I completed 40 puzzles today",
+                    "summary": "Completed 40 puzzles",
+                })
+            elif "chess-mention" in tr:
+                attachments.append({
+                    "goal_id": "G0001",
+                    "transcript": tr,
+                    "kind": "mention",
+                    "date": "2026-08-03",
+                    "anchor": "I was thinking about the tournament date",
+                    "summary": "Discussed tournament timing",
+                })
+    return {
+        "attachments": attachments,
+        "unattached": [],
+        "observations": observations,
+    }
+
+
+def assess_fold_reply(prompt: str) -> dict:
+    occ = re.search(r"^- wikilink: (\[\[[^\]]+\]\])$", prompt, re.M)
+    title = re.search(r"^- title: (.+)$", prompt, re.M)
+    link = occ.group(1) if occ else "[[sources/transcripts/unknown]]"
+    t = title.group(1).strip() if title else "the goal"
+    return {
+        "now": f"The owner made progress on {t} ({link} via thread).",
+        "trajectory_line": f"Advancement recorded on {t}",
+    }
+
+
 def main() -> int:
     prompt = Path(sys.argv[1]).read_text(encoding="utf-8")
     # Thread-fold first: its prompt embeds raw transcript content, which could
     # contain any of the other responders' marker strings.
     if "# Thread fold" in prompt:
         out = thread_fold_reply(prompt)
+    elif "# Assessment fold" in prompt:
+        out = assess_fold_reply(prompt)
+    elif "# Dreamer — The Assessor" in prompt:
+        out = assess_reply(prompt)
     elif "ingest-cc" in prompt or "Session reconstruction" in prompt:
         out = summarize_reply(prompt)
     elif "Stage-B pairwise judgment" in prompt:
