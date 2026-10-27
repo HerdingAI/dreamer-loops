@@ -318,6 +318,12 @@ block no leg — blocking a leg because the system is stale makes it staler.
 "Produced nothing" is never stale on its own: a quiet night is legitimate
 (rule 2). Thresholds live under `freshness:` in `config.yaml`.
 
+The board publisher (`scripts/board_publish.py`) is a read-only projection of
+current conclusions for a display. It publishes an allow-list of sections —
+never web excerpts or the egress record (rule 10) — writes nothing to the
+vault, and is off unless the owner sets `DREAMER_PUBLISH_BOARD=1` beside the
+Postgres credentials.
+
 One-time initialization carve-out: the thread and tag backfills
 (`bin/thread-backfill.sh`, `bin/tag-backfill.sh`) may touch `paused` and
 `decision-only` pages once, at feature initialization — without it the

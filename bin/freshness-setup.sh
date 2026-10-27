@@ -3,7 +3,8 @@
 # Creates the database named by PGDATABASE on the Postgres server described in
 # ~/.config/dreamer/postgres.env (override: DREAMER_PG_ENV) if it does not
 # exist, publishes one snapshot
-# (which creates schema `health`), and reads it back.
+# (which creates schema `health`, and schema `board` when the owner enabled
+# it), and reads it back.
 #
 # This is the only step that creates anything outside schema `health`. Run it
 # yourself, once, after creating postgres.env.
@@ -12,5 +13,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="${DREAMER_PYTHON:-python3}"
 
 "$PY" "$ROOT/scripts/freshness_publish.py" --create-database || exit 1
+# Schema `board` (content). Prints "disabled" and creates nothing unless
+# DREAMER_PUBLISH_BOARD=1 is set in postgres.env.
+"$PY" "$ROOT/scripts/board_publish.py" --init
 "$PY" "$ROOT/scripts/freshness_publish.py" --init
 "$PY" "$ROOT/scripts/freshness_publish.py" --show

@@ -191,6 +191,17 @@ freshness:
   # Runs kept in heartbeats.json.
   run_history_keep: 200
 
+# --- board ----------------------------------------------------------------
+# Whether the board publisher runs at all is DREAMER_PUBLISH_BOARD=1 in
+# postgres.env, never this file.
+board:
+  # Hard cap on one board publish; the process ends after this many seconds.
+  publish_deadline_seconds: 30
+  # A conclusion section longer than this is truncated and counted.
+  section_max_chars: 20000
+  # The MCP server publishes right after a status change.
+  publish_on_owner_write: true
+
 # --- research -------------------------------------------------------------
 research:
   # Loops researched per weekly run.

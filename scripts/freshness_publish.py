@@ -76,6 +76,10 @@ def conn_kwargs(env: dict, dbname: str | None = None) -> dict:
             "dbname": dbname or env["PGDATABASE"], "user": env["PGUSER"],
             "password": env["PGPASSWORD"],
             "connect_timeout": int(F.cfg("freshness", "publish_timeout_seconds")),
+            # Explicit, never the server default: in a SQL_ASCII database the
+            # driver would encode every query as ASCII and fail on the first
+            # non-ASCII character (an arrow in a title is enough).
+            "client_encoding": "UTF8",
             # Bound every statement and every lock wait server-side: a display
             # idling in a transaction on v_status must not hold a job in its
             # exit trap.
@@ -265,7 +269,10 @@ def ensure_database(connect=None) -> str:
         cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (name,))
         if cur.fetchone():
             return "exists"
-        cur.execute(f'CREATE DATABASE "{name}"')
+        # A bare CREATE DATABASE copies template1's encoding, which on some
+        # servers is SQL_ASCII. template0 is the only template that accepts a
+        # different encoding.
+        cur.execute(f"""CREATE DATABASE "{name}" ENCODING 'UTF8' TEMPLATE template0""")
         return "created"
     finally:
         conn.close()
