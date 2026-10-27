@@ -17,6 +17,7 @@ paths:
   resurfacings:    vault/inbox/resurfacings
   sources:         vault/sources/transcripts
   loops:           vault/loops
+  goals:           vault/goals
   conclusions:     vault/conclusions
   concepts:        vault/concepts
   archive:         vault/archive
@@ -84,6 +85,21 @@ extraction:
   # Size of the pilot slice used for calibration before a full backfill.
   slice_size:      100
 
+# --- goals ----------------------------------------------------------------
+# Goals are authored by the owner and tracked by the assessor leg
+# (bin/nightly-assess.sh); Dreamer never invents one.
+goals:
+  max_active:                4    # enforced deterministically at commit
+  silence_ping_days:         10   # days without a mention before a question
+  movement_stale_days:       21   # days without movement before drift is flagged
+  drift_recurrence_min:      3    # mentions-without-movement before a drift question
+  max_open_questions:        2    # back-pressure on the open-questions queue
+  back_off_days:             14   # a deferred question is not re-asked before this
+  silence_escalation_weeks:  3    # silence escalates after this many weeks
+  # Transcripts the assessor reads per run, oldest unassessed first. The rest
+  # drain on later nights; a normal night ingests fewer than this.
+  assess_batch_size:         5
+
 # --- tagging --------------------------------------------------------------
 tagging:
   # One-time backfill drain batch size (bin/tag-backfill.sh); safe to delete
@@ -131,6 +147,10 @@ budget:
   # The thread fold reads one inlined transcript plus the current thread and
   # returns JSON. It runs RESTRICTED (run_claude 4th arg): no tools at all.
   max_turns_thread_fold: 8
+  # The assessor may read the goal catalog and transcripts; its fold step
+  # (one attachment into one goal's assessment) runs RESTRICTED, no tools.
+  max_turns_assess: 30
+  max_turns_assess_fold: 8
   # Model for headless job runs. The jobs are high-volume and structured, so
   # a cheaper model per call means more calls before any usage window closes.
   model: sonnet
@@ -205,6 +225,12 @@ mcp:
   transport: stdio              # no TCP listener, so no token to manage
   note_max_chars: 500
   max_resurfacings_per_run: 50
+  # Owner-write tools (commit_goal, set_status, ...) must carry a verbatim
+  # owner quote of at least this many characters.
+  owner_write_quote_min_chars: 8
+  # A write whose quote is still absent from ingested Human turns after this
+  # many days is quarantined and raised as an owner question.
+  owner_write_verify_lag_days: 3
 
 # --- pinned versions ------------------------------------------------------
 pins:

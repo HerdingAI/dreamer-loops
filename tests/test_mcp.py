@@ -50,7 +50,49 @@ class StdioProtocolTest(unittest.TestCase):
         names = [t["name"] for t in replies[1]["result"]["tools"]]
         self.assertEqual(sorted(names), sorted([
             "search_insights", "get_loop", "list_open_loops",
-            "get_latest_digest", "search_wisdom", "log_resurfacing"]))
+            "get_latest_digest", "search_wisdom", "log_resurfacing",
+            "get_goal", "list_active_goals", "commit_goal", "revise_plan",
+            "complete_step", "set_status", "assert_evidence", "answer_question",
+            "list_open_questions",
+        ]))
+
+    GOAL_TOOLS = ("get_goal", "list_active_goals", "list_open_questions", "commit_goal",
+                  "revise_plan", "complete_step", "set_status", "assert_evidence",
+                  "answer_question")
+    WRITE_TOOLS = GOAL_TOOLS[3:]
+
+    def _tools(self) -> tuple[dict, dict]:
+        replies = self.converse([
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersion": "2025-06-18", "capabilities": {}}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        ])
+        return replies[0]["result"], {t["name"]: t for t in replies[1]["result"]["tools"]}
+
+    def test_server_instructions_route_every_goal_tool(self) -> None:
+        # A client that reads `instructions` gets one map of which tool to
+        # reach for; one that does not still has the per-tool descriptions.
+        init, _ = self._tools()
+        for name in self.GOAL_TOOLS:
+            self.assertIn(name, init["instructions"])
+
+    def test_goal_tool_descriptions_say_when_and_document_every_parameter(self) -> None:
+        _, tools = self._tools()
+        for name in self.GOAL_TOOLS:
+            t = tools[name]
+            self.assertRegex(t["description"], r"(?i)\b(call|use) (this )?(only )?(when|after|before)\b",
+                             f"{name}: description must say WHEN to call it")
+            for prop, spec in t["inputSchema"]["properties"].items():
+                self.assertTrue(spec.get("description"), f"{name}.{prop} has no description")
+
+    def test_write_tools_state_the_confirmation_gate(self) -> None:
+        # Rule 16 has to reach the model that is deciding whether to write.
+        _, tools = self._tools()
+        for name in self.WRITE_TOOLS:
+            d = tools[name]["description"].lower()
+            self.assertIn("verbatim", d, name)
+            self.assertIn("ask", d, f"{name}: must say to ask when intent is unclear")
+            self.assertIn("confirmation", d, f"{name}: must say to relay the confirmation")
 
     def test_notification_produces_no_reply(self) -> None:
         replies = self.converse([

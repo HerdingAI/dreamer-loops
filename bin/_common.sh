@@ -474,7 +474,11 @@ update_run_state(path, mutate)
 PYEOF
 }
 
-regen_catalog() { "$PY" "$ROOT/scripts/vault.py" catalog >/dev/null && log "catalog regenerated"; }
+regen_catalog() {
+  "$PY" "$ROOT/scripts/vault.py" catalog >/dev/null 2>&1 || true
+  "$PY" "$ROOT/scripts/goals.py" catalog >/dev/null 2>&1 || true
+  log "catalogs regenerated"
+}
 
 # The dashboard is a read-only projection, so it can never fail the run that
 # produces it — a broken chart is not a reason to lose a night's research.
