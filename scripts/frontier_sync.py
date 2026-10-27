@@ -12,9 +12,13 @@ Dreamer starts every exchange with the show over HTTP(S) (stdlib urllib, token i
   push    Releases ready lessons within the ceiling (POST /lessons), re-sends released
           lessons the show does not know, and replaces the show's known list (POST /known).
   status  Prints the sync state (no secrets) and lesson counts by status.
+  withdraw <lesson> --cause "..."
+          Operator command: stops a lesson before it airs. A ready/held lesson is dropped; a
+          released, unaired one is withdrawn at the show (POST /lessons/<id>/withdraw) and
+          failed here. Takes frontier.lock non-blocking; exits 1 when it changed nothing.
 
-Each prints one JSON status object and exits 0: a show outage is a reported state, not a
-crash. Exit 2 means wiki.lock stayed busy (deferred; nothing marked), as frontier_map.py.
+pull, push and status print one JSON status object and exit 0: a show outage is a reported
+state, not a crash. Exit 2 means wiki.lock stayed busy (deferred; nothing marked), as frontier_map.py.
 
 Locking: the caller holds frontier.lock. NO HTTP call is made while wiki.lock is
 held. Every step is plan under wiki.lock -> HTTP outside it -> apply under wiki.lock, and the
@@ -35,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import fcntl
 import hashlib
 import ipaddress
 import json
@@ -279,6 +284,16 @@ def _apply_lessons(delivered: list[dict], now: _dt.datetime, report: dict) -> No
             report["failed"].append(lesson.id)
 
 
+def _reused_id(lesson: "F.Lesson", tid: int, kind: str, at: str | None) -> bool:
+    """True when the lesson already records tap `tid` with a different kind or time. `at` is
+    compared as add_tap would store it; a time the show sent unreadable (None) is not compared,
+    since add_tap would stamp it with the clock and a replay could never match."""
+    for t in lesson.taps:
+        if t["id"] == str(tid):
+            return t.get("kind") != kind or (at is not None and F._now(at) != t.get("at"))
+    return False
+
+
 def _apply_taps(taps: list[dict], cursor: int, stamp: str, report: dict) -> int:
     """Apply taps in id order; returns the cursor after the last tap applied or skipped. A tap
     whose apply raises stops the pass, so the cursor never passes an unapplied tap."""
@@ -289,6 +304,10 @@ def _apply_taps(taps: list[dict], cursor: int, stamp: str, report: dict) -> int:
         lesson = _load_lesson(lid) if lid and tap.get("resolved") is not False else None
         if lesson is None or kind not in F.TAP_KINDS:
             report["taps_skipped"].append({"id": tid, "reason": "unresolved" if not lid else "unknown lesson"})
+        elif _reused_id(lesson, tid, kind, _show_time(tap.get("at"))):
+            # add_tap dedupes on the id alone, so it would drop this tap and the check below
+            # would call it applied. Same id, other kind or time: the show handed the id out again.
+            report["taps_reused"].append({"id": tid, "lesson": lid, "reason": "the show reused tap id"})
         else:
             F.add_tap(lid, kind, str(tid), _show_time(tap.get("at")))
             lesson = _load_lesson(lid)
@@ -304,7 +323,7 @@ def _apply_taps(taps: list[dict], cursor: int, stamp: str, report: dict) -> int:
 
 def pull(show: Show | None = None) -> dict:
     report = {"cmd": "pull", "status": "ok", "aired": [], "failed": [], "taps_applied": [],
-              "taps_skipped": [], "follow_ups_cancelled": [], "cursor": 0}
+              "taps_skipped": [], "taps_reused": [], "follow_ups_cancelled": [], "cursor": 0}
     if not enabled():
         return {**report, "status": "disabled"}
     if show is None:
@@ -560,6 +579,64 @@ def push(show: Show | None = None) -> dict:
 
 
 # --------------------------------------------------------------------------
+# Withdraw
+# --------------------------------------------------------------------------
+
+def withdraw(lesson_id: str, cause: str, show: Show | None = None) -> dict:
+    """Stop a lesson before it airs. The report's `ok` is False when nothing was changed."""
+    report = {"cmd": "withdraw", "status": "ok", "ok": True, "lesson": lesson_id}
+
+    def refuse(why: str, **extra) -> dict:
+        return {**report, "status": why, "ok": False, **extra}
+
+    cause = cause.strip()
+    if not cause:
+        return refuse("a cause is required")
+    why_cause = f"withdrawn by operator: {cause}"
+    stamp = _now()
+    with _wiki_lock():
+        lesson = _load_lesson(lesson_id)
+        if lesson is None:
+            return refuse("no such lesson")
+        if lesson.status in F.UNDELIVERED:
+            was = lesson.status
+            _set_status(lesson, "dropped", why_cause, stamp)
+            return {**report, "was": was, "now": "dropped"}
+        if lesson.status != "released" or lesson.aired_on:
+            return refuse(f"not withdrawable: the lesson is {lesson.status}")
+    # Only a released lesson needs the show; with frontier.show_url empty nothing is asked.
+    if not enabled():
+        return refuse("disabled")
+    if show is None:
+        token = load_token()
+        if token is None:
+            return refuse("not configured")
+        try:
+            show = Show(token)
+        except InsecureShowUrl as exc:
+            return refuse(str(exc))
+    code, data = show.call("POST", f"/lessons/{lesson_id}/withdraw", {"reason": cause})   # no wiki.lock here
+    note = None
+    if code == 409:
+        detail = (data or {}).get("detail")
+        assigned = str(detail.get("assigned_date") or "") if isinstance(detail, dict) else ""
+        return refuse("already in a show", assigned_date=assigned)
+    if code == 404:
+        # The show never stored it. Left `released`, push would re-send it.
+        note = "the show never stored it"
+    else:
+        why = _unusable(code)
+        if why or data is None:
+            return refuse(why or "show sent an unreadable reply")
+    with _wiki_lock():
+        lesson = _load_lesson(lesson_id)
+        if lesson is None or lesson.status != "released" or lesson.aired_on:
+            return refuse("the lesson changed while the show was asked; check it")
+        _set_status(lesson, "failed", why_cause, stamp)
+    return {**report, "was": "released", "now": "failed", **({"note": note} if note else {})}
+
+
+# --------------------------------------------------------------------------
 # Status and CLI
 # --------------------------------------------------------------------------
 
@@ -574,13 +651,44 @@ def status() -> dict:
             "state": {**state, "conflicts": sorted(state["conflicts"])}, "lessons": counts}
 
 
+def _withdraw_cli(lesson_id: str, cause: str) -> int:
+    # An operator command outside bin/frontier.sh, so it takes the run's lock itself and gives
+    # up at once when a run holds it (as frontier_gaps.py recheck does). The flock is taken
+    # directly, not through state_lock: that sets DREAMER_LOCK_HELD, which would turn the
+    # wiki.lock below into a no-op and leave the vault writes unprotected.
+    lock = p("meta") / str(_cfg("lock_file"))
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock, "a") as fh:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print(json.dumps({"cmd": "withdraw", "ok": False,
+                              "status": f"{lock.name} is held by a frontier run; try again later"}))
+            return 1
+        try:
+            result = withdraw(lesson_id, cause)
+        except TimeoutError as exc:
+            print(f"frontier_sync: {exc} (wiki.lock)", file=sys.stderr)
+            return 2
+        except Exception as exc:  # noqa: BLE001 - report the class only; never a body or a token
+            result = {"cmd": "withdraw", "ok": False, "status": f"failed ({type(exc).__name__})"}
+    print(json.dumps(result))
+    return 0 if result["ok"] else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Knowledge frontier sync with the show")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("pull", help="apply aired/failed lessons and taps; prints a JSON status")
     sub.add_parser("push", help="release lessons within the ceiling and send the known list")
     sub.add_parser("status", help="sync state and lesson counts")
+    wd = sub.add_parser("withdraw", help="stop a lesson before it airs, under frontier.lock; "
+                                         "prints a JSON status")
+    wd.add_argument("lesson", help="lesson id, e.g. K7001-1")
+    wd.add_argument("--cause", required=True, help="why; recorded on the lesson and sent to the show")
     args = ap.parse_args(argv)
+    if args.cmd == "withdraw":
+        return _withdraw_cli(args.lesson, args.cause)
     try:
         result = {"pull": pull, "push": push, "status": status}[args.cmd]()
     except TimeoutError as exc:

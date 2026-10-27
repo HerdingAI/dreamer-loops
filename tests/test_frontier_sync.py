@@ -44,6 +44,7 @@ class FakeShow:
         self.status_code = 200
         self.lesson_replies: list = []          # per POST /lessons: (code, body) or a callable(payload)
         self.known_code = 200
+        self.withdraw_reply = None              # (code, body) for POST /lessons/<id>/withdraw
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -77,6 +78,10 @@ class FakeShow:
 
             def do_POST(self):
                 payload = self._record()
+                if self.path.endswith("/withdraw"):
+                    code, body = outer.withdraw_reply or (200, {"state": "withdrawn", "id": self.path.split("/")[2],
+                                                                "was": "ready"})
+                    return self._reply(code, body)
                 if self.path == "/known":
                     return self._reply(outer.known_code, {"ok": True, "count": len(payload["titles"])})
                 reply = outer.lesson_replies.pop(0) if outer.lesson_replies else None
@@ -241,6 +246,28 @@ class OptInTest(SyncCase):
         self.assertEqual(S.pull(Boom())["status"], "disabled")
         self.assertEqual(S.push(Boom())["status"], "disabled")
 
+    def test_withdraw_is_disabled_without_token_or_http_and_changes_nothing(self):
+        les = self.lesson(status="released", released_at=self.days_ago(1))
+        with mock.patch.object(S, "load_token", side_effect=AssertionError("token read")), \
+             mock.patch.object(S.urllib.request.OpenerDirector, "open",
+                               side_effect=AssertionError("http call")):
+            self.assertEqual(S.withdraw(les.id, "cone chart mismatch")["status"], "disabled")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(S.main(["withdraw", les.id, "--cause", "cone chart mismatch"]), 1)
+            self.assertEqual(json.loads(out.getvalue())["status"], "disabled")
+        self.assertEqual(self.get(les.id).status, "released")
+        self.assertEqual(self.fake.requests, [])
+
+    def test_a_ready_lesson_is_still_dropped_locally_with_the_show_disabled(self):
+        ready = self.lesson(status="ready")
+        with mock.patch.object(S, "load_token", side_effect=AssertionError("token read")), \
+             mock.patch.object(S.urllib.request.OpenerDirector, "open",
+                               side_effect=AssertionError("http call")):
+            self.assertEqual(S.withdraw(ready.id, "cone chart mismatch")["now"], "dropped")
+        self.assertEqual(self.get(ready.id).status, "dropped")
+        self.assertEqual(self.fake.requests, [])
+
     def test_a_set_url_with_no_token_still_says_not_configured(self):
         dc.CFG["frontier"]["show_url"] = self.fake.url
         self.env_file.unlink()
@@ -378,6 +405,41 @@ class PullTest(SyncCase):
         self.fake.status = {"taps": [self.tap(4, les2.id, at="2030-01-16 19:00:00")], "lessons": []}
         S.pull()
         self.assertEqual(self.get(les2.id).taps[0]["at"], tapped.astimezone().isoformat(timespec="seconds"))
+
+    def test_a_reused_tap_id_with_a_different_time_is_reported_not_applied(self):
+        """The show handing out an id the lesson already recorded must not pass for a replay."""
+        it, les = self.aired_lesson()
+        self.fake.status = {"taps": [self.tap(5, les.id, "got_it", at="2030-01-16 19:00:00")], "lessons": []}
+        S.pull()
+        quadrant = F.Item.from_path(F.item_path(it.id)).quadrant
+        self.fake.status = {"taps": [self.tap(5, les.id, "got_it", at="2030-01-17 07:30:00")], "lessons": []}
+        report = S.pull()
+        self.assertEqual(report["taps_applied"], [])
+        self.assertEqual(report["taps_reused"], [{"id": 5, "lesson": les.id, "reason": "the show reused tap id"}])
+        self.assertEqual(len(self.get(les.id).taps), 1)
+        self.assertEqual(F.Item.from_path(F.item_path(it.id)).quadrant, quadrant)
+        self.assertEqual(self.state()["cursor"], 5)
+
+    def test_a_reused_tap_id_with_a_different_kind_is_reported_not_applied(self):
+        it, les = self.aired_lesson()
+        self.fake.status = {"taps": [self.tap(5, les.id, "got_it")], "lessons": []}
+        S.pull()
+        quadrant = F.Item.from_path(F.item_path(it.id)).quadrant
+        self.fake.status = {"taps": [self.tap(5, les.id, "dig_deeper")], "lessons": []}
+        report = S.pull()
+        self.assertEqual(report["taps_applied"], [])
+        self.assertEqual([r["id"] for r in report["taps_reused"]], [5])
+        self.assertEqual([t["kind"] for t in self.get(les.id).taps], ["got_it"])
+        self.assertEqual(F.Item.from_path(F.item_path(it.id)).quadrant, quadrant)
+        self.assertEqual(self.state()["cursor"], 5)
+
+    def test_a_genuine_replay_reports_no_reuse(self):
+        it, les = self.aired_lesson()
+        self.fake.status = {"taps": [self.tap(5, les.id, at="2030-01-16 19:00:00")], "lessons": []}
+        S.pull()
+        report = S.pull()
+        self.assertEqual(report["taps_applied"], [5])
+        self.assertEqual(report["taps_reused"], [])
 
     def test_an_undone_tap_is_never_reapplied(self):
         it, les = self.aired_lesson()
@@ -756,6 +818,143 @@ class PushTest(SyncCase):
         S.pull(); S.push()
         self.assertTrue(self.fake.requests)
         self.assertTrue(all(self.fake.lock_free), self.fake.lock_free)
+
+
+class WithdrawTest(SyncCase):
+    CAUSE = "the firing table contradicts the cited cone chart"
+
+    def run_withdraw(self, lid, cause=None):
+        out, err = io.StringIO(), io.StringIO()
+        argv = ["withdraw", lid] + ([] if cause is None else ["--cause", cause])
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = S.main(argv)
+        self.assertNotIn(TOKEN, out.getvalue() + err.getvalue())
+        lines = out.getvalue().strip().splitlines()
+        return rc, (json.loads(lines[0]) if lines else None), lines
+
+    def withdraws(self):
+        return [r for r in self.fake.requests if r["path"].endswith("/withdraw")]
+
+    def released(self):
+        return self.lesson(status="released", released_at=self.days_ago(1))
+
+    def test_a_ready_or_held_lesson_is_dropped_without_a_show_call(self):
+        for status in ("ready", "held"):
+            les = self.lesson(status=status)
+            rc, out, lines = self.run_withdraw(les.id, self.CAUSE)
+            self.assertEqual((rc, len(lines)), (0, 1))
+            self.assertEqual(out["cmd"], "withdraw")
+            back = self.get(les.id)
+            self.assertEqual(back.status, "dropped")
+            self.assertEqual(back.check["status_cause"], f"withdrawn by operator: {self.CAUSE}")
+        self.assertEqual(self.fake.requests, [])
+
+    def test_a_released_lesson_is_withdrawn_at_the_show_and_failed_here(self):
+        les = self.released()
+        rc, out, _ = self.run_withdraw(les.id, self.CAUSE)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.withdraws(), [{"method": "POST", "path": f"/lessons/{les.id}/withdraw",
+                                             "payload": {"reason": self.CAUSE}, "token": TOKEN}])
+        back = self.get(les.id)
+        self.assertEqual(back.status, "failed")
+        self.assertEqual(back.check["status_cause"], f"withdrawn by operator: {self.CAUSE}")
+        self.assertTrue(all(self.fake.lock_free))                # no wiki.lock held during HTTP
+
+    def test_a_show_that_never_stored_it_still_fails_it_here_and_says_so(self):
+        les = self.released()
+        self.fake.withdraw_reply = (404, {"detail": "no such lesson"})
+        rc, out, _ = self.run_withdraw(les.id, self.CAUSE)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.get(les.id).status, "failed")
+        self.assertIn("never stored", out["note"])
+
+    def test_a_lesson_already_in_an_assembled_show_is_left_alone(self):
+        les = self.released()
+        self.fake.withdraw_reply = (409, {"detail": {"state": "assembled", "assigned_date": "2030-01-17"}})
+        rc, out, _ = self.run_withdraw(les.id, self.CAUSE)
+        self.assertEqual(rc, 1)
+        self.assertEqual(out["status"], "already in a show")
+        self.assertEqual(out["assigned_date"], "2030-01-17")
+        self.assertEqual(self.get(les.id).status, "released")
+
+    def test_an_unusable_answer_or_no_token_changes_nothing(self):
+        les = self.released()
+        for reply in ((500, {}), (401, {}), (503, {}), (400, {})):
+            self.fake.withdraw_reply = reply
+            rc, out, _ = self.run_withdraw(les.id, self.CAUSE)
+            self.assertEqual(rc, 1)
+            self.assertEqual(self.get(les.id).status, "released")
+        self.env_file.unlink()
+        before = len(self.fake.requests)
+        rc, out, _ = self.run_withdraw(les.id, self.CAUSE)
+        self.assertEqual((rc, out["status"]), (1, "not configured"))
+        self.assertEqual(len(self.fake.requests), before)
+        self.assertEqual(self.get(les.id).status, "released")
+
+    def test_other_statuses_are_refused_by_name(self):
+        for status, extra in (("aired", {"aired_on": "2030-01-08"}), ("got_it", {"aired_on": "2030-01-08"}),
+                              ("dig_deeper", {"aired_on": "2030-01-08"}), ("dropped", {}),
+                              ("rejected", {}), ("failed", {})):
+            les = self.lesson(status=status, **extra)
+            rc, out, _ = self.run_withdraw(les.id, self.CAUSE)
+            self.assertEqual(rc, 1, status)
+            self.assertIn(status, out["status"])
+            self.assertEqual(self.get(les.id).status, status)
+        self.assertEqual(self.fake.requests, [])
+
+    def test_a_released_lesson_that_has_aired_is_refused(self):
+        les = self.lesson(status="released", released_at=self.days_ago(2), aired_on="2030-01-14")
+        rc, out, _ = self.run_withdraw(les.id, self.CAUSE)
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.fake.requests, [])
+        self.assertEqual(self.get(les.id).status, "released")
+
+    def test_an_unknown_lesson_is_rc_1(self):
+        rc, out, _ = self.run_withdraw("K9999-1", self.CAUSE)
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.fake.requests, [])
+
+    def test_an_insecure_show_url_is_refused_before_any_request(self):
+        les = self.released()
+        dc.CFG["frontier"].pop("allow_insecure_http", None)
+        dc.CFG["frontier"]["show_url"] = "http://example.org"
+        with mock.patch.object(S.urllib.request.OpenerDirector, "open",
+                               side_effect=AssertionError("http call")):
+            rc, out, _ = self.run_withdraw(les.id, self.CAUSE)
+        self.assertEqual(rc, 1)
+        self.assertIn("frontier.allow_insecure_http", out["status"])
+        self.assertEqual(self.get(les.id).status, "released")
+
+    def test_a_cause_is_required_and_not_blank(self):
+        les = self.lesson(status="ready")
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            S.main(["withdraw", les.id])
+        rc, out, _ = self.run_withdraw(les.id, "   ")
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.get(les.id).status, "ready")
+
+    def test_a_busy_frontier_lock_changes_nothing(self):
+        les = self.lesson(status="ready")
+        with open(self.tmp / "meta" / dc.CFG["frontier"]["lock_file"], "a") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            rc, out, _ = self.run_withdraw(les.id, self.CAUSE)
+        self.assertEqual(rc, 1)
+        self.assertIn("frontier.lock", json.dumps(out))
+        self.assertEqual(self.get(les.id).status, "ready")
+        self.assertEqual(self.fake.requests, [])
+
+    def test_push_neither_resends_a_withdrawn_lesson_nor_counts_it_against_the_ceiling(self):
+        dc.CFG["frontier"]["weekly_ceiling"] = 1
+        gone = self.released()
+        waiting = self.lesson(status="ready")
+        self.fake.status = {"taps": [], "lessons": []}          # the show holds nothing
+        self.run_withdraw(gone.id, self.CAUSE)
+        report = S.push()
+        sent = [r["payload"]["id"] for r in self.fake.posts()]
+        self.assertEqual(sent, [waiting.id])                    # the freed slot went to the other lesson
+        self.assertEqual(report["released"], [waiting.id])
+        self.assertNotIn(gone.id, report["redelivered"])
+        self.assertEqual(self.get(gone.id).status, "failed")
 
 
 if __name__ == "__main__":
