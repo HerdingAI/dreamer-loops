@@ -74,6 +74,14 @@ def _neutralize_structure(text: str, problems: list[str]) -> str:
     return "\n".join(out).strip()
 
 
+def _one_line(text) -> str:
+    """A field that is rendered on a single bullet line must BE a single line.
+    A claim, citation, sub-question, query or URL carrying a newline would end
+    its bullet and could open a `## Heading` of its own — web text planting a
+    section of the page (rule 10). Whitespace runs collapse to one space."""
+    return " ".join(str(text or "").split())
+
+
 def _slug(text: str, maxlen: int = 60) -> str:
     s = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
     return (s[:maxlen].rsplit("-", 1)[0] or s[:maxlen]) or "conclusion"
@@ -87,8 +95,8 @@ def _claims(items, kind: str, problems: list[str]) -> list[dict]:
         if not isinstance(c, dict):
             problems.append(f"{kind}[{i}]: not an object")
             continue
-        claim = (c.get("claim") or "").strip()
-        citation = (c.get("citation") or "").strip()
+        claim = _one_line(c.get("claim"))
+        citation = _one_line(c.get("citation"))
         if not claim:
             continue
         if not citation:
@@ -189,7 +197,7 @@ def render(loop: V.Loop, payload: dict, problems: list[str]) -> str:
 
     subs = s.get("open_sub_questions") or []
     if subs:
-        lines += ["## Open sub-questions", ""] + [f"- {x}" for x in subs] + [""]
+        lines += ["## Open sub-questions", ""] + [f"- {_one_line(x)}" for x in subs] + [""]
 
     if payload.get("decision_framing"):
         lines += ["## Decision framing", "", payload["decision_framing"].strip(), ""]
@@ -200,9 +208,9 @@ def render(loop: V.Loop, payload: dict, problems: list[str]) -> str:
         lines += ["## Egress record", "",
                   "Everything this conclusion sent off the machine.", ""]
         for q in queries:
-            lines.append(f"- query: `{q}`")
+            lines.append(f"- query: `{_one_line(q)}`")
         for u in urls:
-            lines.append(f"- fetched: `{u}`")
+            lines.append(f"- fetched: `{_one_line(u)}`")
         lines.append("")
     return "\n".join(lines)
 

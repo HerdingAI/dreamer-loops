@@ -913,6 +913,14 @@ PUB=$(cd "$WORK" && python3 scripts/freshness_publish.py; echo "rc=$?")
 case "$PUB" in *"publish: not configured"*"rc=0") ok "an unconfigured publisher says so and exits 0" ;;
   *) bad "unconfigured publisher — got: $PUB" ;; esac
 
+BPUB=$(cd "$WORK" && python3 scripts/board_publish.py; echo "rc=$?")
+case "$BPUB" in *"board: not configured"*"rc=0") ok "an unconfigured board publisher says so and exits 0" ;;
+  *) bad "unconfigured board publisher — got: $BPUB" ;; esac
+
+BDRY=$(cd "$WORK" && python3 scripts/board_publish.py --dry-run)
+case "$BDRY" in *"board: dry run, "*" pairs, "*" skipped, hash "*) ok "the board dry run counts pairs and connects to nothing" ;;
+  *) bad "board dry run — got: $BDRY" ;; esac
+
 G_BEFORE=$(cd "$WORK" && sha256sum vault/goals/G0001.md | cut -d' ' -f1)
 (cd "$WORK" && DREAMER_TODAY=2026-09-19 python3 scripts/freshness.py --json >/dev/null)
 (cd "$WORK" && python3 scripts/freshness_publish.py >/dev/null)

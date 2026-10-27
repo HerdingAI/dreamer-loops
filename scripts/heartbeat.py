@@ -29,6 +29,10 @@ from dreamer_common import CFG, atomic_write_json, p, read_json  # noqa: E402
 FILE = "heartbeats.json"
 OUTCOMES = ("ok", "failed", "skipped")
 
+# One record per publisher. `publish` is the freshness (health) publisher;
+# `publish_board` is the opt-in content publisher.
+PUBLISH_TARGETS = ("publish", "publish_board")
+
 
 def clock() -> _dt.datetime:
     """The freshness clock. DREAMER_NOW pins it exactly (tests); DREAMER_TODAY
@@ -57,14 +61,14 @@ def load(meta=None) -> dict:
     data = read_json(meta_dir(meta) / FILE, default={})
     if not isinstance(data, dict):
         data = {}
-    out = {"jobs": data.get("jobs"), "runs": data.get("runs"),
-           "publish": data.get("publish")}
+    out = {"jobs": data.get("jobs"), "runs": data.get("runs")}
     if not isinstance(out["jobs"], dict):
         out["jobs"] = {}
     if not isinstance(out["runs"], list):
         out["runs"] = []
-    if not isinstance(out["publish"], dict):
-        out["publish"] = {}
+    for target in PUBLISH_TARGETS:
+        value = data.get(target)
+        out[target] = value if isinstance(value, dict) else {}
     return out
 
 
@@ -111,15 +115,17 @@ def record(job: str, started: str, outcome: str, produced: bool = False,
 
 
 def record_publish(configured: bool, ok: bool, error: str | None = None,
-                   at: str | None = None, meta=None) -> dict:
+                   at: str | None = None, meta=None, target: str = "publish") -> dict:
     """`error` is an exception CLASS NAME only — a message could carry a
     hostname or a credential fragment into the heartbeat file."""
+    if target not in PUBLISH_TARGETS:
+        raise ValueError(f"unknown publish target {target!r}")
     at = at or stamp(clock())
     with _locked(meta):
         data = load(meta)
-        before = dict(data["publish"])
+        before = dict(data[target])
         if not configured:
-            data["publish"] = {"configured": False}
+            data[target] = {"configured": False}
         else:
             pub = {"configured": True}
             for k in ("last_ok", "last_error", "last_error_at"):
@@ -132,9 +138,9 @@ def record_publish(configured: bool, ok: bool, error: str | None = None,
             else:
                 pub["last_error"] = error or "Error"
                 pub["last_error_at"] = at
-            data["publish"] = pub
+            data[target] = pub
         # The hourly unconfigured publish must not dirty the tree every hour.
-        if data["publish"] != before or not (meta_dir(meta) / FILE).exists():
+        if data[target] != before or not (meta_dir(meta) / FILE).exists():
             atomic_write_json(meta_dir(meta) / FILE, data)
     return data
 
