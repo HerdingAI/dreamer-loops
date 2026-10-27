@@ -17,6 +17,11 @@
 
 # Raw exports waiting to be ingested, and the extracted reference corpus.
 to_ingest/
+# Liveness state, rewritten on every job EXIT (after that job's own commit) and
+# hourly by the freshness publisher. Tracking it would leave the tree dirty
+# after every run. Regenerable.
+vault/.vault-meta/heartbeats.json
+vault/.vault-meta/*.lock
 wisdom_md/
 
 # Job logs contain excerpts of your own material.

@@ -3,6 +3,7 @@
 # over batches, resuming from the extracted-ledger checkpoint.
 JOB=backfill
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+arm_heartbeat
 acquire_lock
 
 BATCHES="${1:-999}"

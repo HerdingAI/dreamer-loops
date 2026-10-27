@@ -32,12 +32,64 @@ TODAY() { printf '%s' "${DREAMER_TODAY:-$(date -I)}"; }
 log() { printf '[%s] [%s] %s\n' "$(date -Is)" "$JOB" "$*"; }
 die() { log "FATAL: $*"; exit 1; }
 
+# --- heartbeats -------------------------------------
+# A job calls arm_heartbeat once, right after sourcing this file. On ANY exit
+# the trap records when the job ran, whether it succeeded, and whether it
+# changed the vault. The outcome is ok (exit 0), skipped (exit 0 after
+# mark_skipped: lock held, leg blocked), or failed (anything else). The trap
+# never changes the job's exit status.
+_HB_ARMED=0
+_HB_PRODUCED=0
+_HB_SKIPPED=0
+_HB_STARTED=""
+mark_produced() { _HB_PRODUCED=1; }
+mark_skipped()  { _HB_SKIPPED=1; }
+
+_heartbeat_exit() {
+  local rc=$?
+  trap - EXIT
+  local outcome=ok
+  if (( rc != 0 )); then
+    outcome=failed
+  elif [[ "$_HB_SKIPPED" == 1 ]]; then
+    outcome=skipped
+  fi
+  local flag=()
+  [[ "$_HB_PRODUCED" == 1 ]] && flag=(--produced)
+  "$PY" "$ROOT/scripts/heartbeat.py" record --job "$JOB" \
+      --started "$_HB_STARTED" --outcome "$outcome" --meta "$META" \
+      ${flag[@]+"${flag[@]}"} \
+    || log "WARN heartbeat not recorded (see stderr above)"
+  # Publish the snapshot this run just changed. Always exits 0 and is `|| true`
+  # besides: a display being unreachable is never a reason for a job to fail.
+  # `9>&-` closes the vault lock in the child, so a publisher that outlives
+  # this shell can never hold wiki.lock; the publisher also bounds itself
+  # with a hard deadline (freshness.publish_deadline_seconds).
+  "$PY" "$ROOT/scripts/freshness_publish.py" --meta "$META" \
+      >> "$LOGS/freshness-publish.log" 2>&1 9>&- || true
+  exit "$rc"
+}
+
+arm_heartbeat() {
+  [[ "$_HB_ARMED" == 1 ]] && return 0
+  _HB_ARMED=1
+  _HB_STARTED=$("$PY" "$ROOT/scripts/heartbeat.py" now)
+  trap _heartbeat_exit EXIT
+  # Bash runs the EXIT trap from its signal handler with $? still 0, so a
+  # killed job would be recorded as a clean run. Turn the signal into its
+  # conventional exit status first; the EXIT trap then records `failed`.
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
+  trap 'exit 129' HUP
+}
+
 # --- advisory vault lock (wiki-lock) -------------------------------------
 LOCKFILE="$META/wiki.lock"
 acquire_lock() {
   exec 9>"$LOCKFILE"
   if ! flock -n 9; then
     log "vault is locked by another job — exiting cleanly (no work lost)"
+    mark_skipped
     exit 0
   fi
   echo "$JOB:$$:$(date -Is)" >&9 || true
@@ -507,8 +559,18 @@ commit() {
     log "nothing to commit (job surface clean; other changes left alone)"
     return 0
   fi
-  git -c user.name="dreamer" -c user.email="dreamer@localhost" \
-      commit -q -m "$msg" && log "committed: $msg"
+  # "Produced" means vault CONTENT changed. A commit that only carries
+  # run-state, ledgers or logs is a quiet night and must not move the
+  # last_produced clock (freshness spec §3.1). Digests are excluded too: a
+  # quiet run regenerates the week's digest, and output.digest tracks them.
+  local produced=0
+  git diff --cached --quiet -- vault ':(exclude)vault/.vault-meta' \
+      ':(exclude)vault/digests' || produced=1
+  if git -c user.name="dreamer" -c user.email="dreamer@localhost" \
+      commit -q -m "$msg"; then
+    log "committed: $msg"
+    (( produced )) && mark_produced
+  fi
   # After, not before: the dashboard should describe the state that was just
   # committed. It is gitignored, so this never dirties the tree it just cleaned.
   regen_dashboard

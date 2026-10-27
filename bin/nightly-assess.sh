@@ -2,12 +2,14 @@
 # Job: nightly-assess (§4, §7.1). Nightly leg following nightly-extract.
 JOB=nightly-assess
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+arm_heartbeat
 
 run_healthcheck "before assess leg"
 
 if leg_blocked "assess"; then
   log "assess leg is blocked by healthcheck — skipping"
   record_event "degraded" "assess leg blocked by healthcheck; work resumes when health passes"
+  mark_skipped
   exit 0
 fi
 

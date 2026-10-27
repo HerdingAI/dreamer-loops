@@ -10,6 +10,8 @@ set -uo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="${1:-$(mktemp -d /tmp/dreamer-week-XXXXXX)}"
+# The sandbox must never publish to a real database.
+export DREAMER_PG_ENV="$WORK/no-such-postgres.env"
 PASS=0; FAIL=0
 
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; PASS=$((PASS+1)); }
@@ -884,9 +886,38 @@ check "the ping is not re-asked at the next session" "" "$BRIEF2"
 check "a headless session is told nothing" "" "$HEADLESS"
 
 # Well past the escalation window: questions accumulate, the goal does not move.
-(cd "$WORK" && DREAMER_TODAY=2026-09-20 bash bin/nightly-assess.sh)
+(cd "$WORK" && DREAMER_TODAY=2026-09-14 bash bin/nightly-assess.sh)
 G_STATUS=$(cd "$WORK" && python3 -c "import sys; sys.path.insert(0, 'scripts'); import goals as G; print(G.load_goal('G0001').status)")
 check "weeks of silence never change the goal's status" "active" "$G_STATUS"
+
+step "Freshness: a job that stops running goes stale; an unconfigured display is harmless"
+
+fresh_status() { # fresh_status <today> <axis>
+  (cd "$WORK" && DREAMER_TODAY="$1" python3 scripts/freshness.py --json) \
+    | python3 -c "import json,sys; print({a['axis']: a['status'] for a in json.load(sys.stdin)['axes']}['$2'])"
+}
+check "the assessor's heartbeat is fresh the day it ran" "ok" \
+  "$(fresh_status 2026-09-14 job.nightly-assess)"
+check "five days without a run, the assessor axis is stale" "stale" \
+  "$(fresh_status 2026-09-19 job.nightly-assess)"
+
+(cd "$WORK" && DREAMER_TODAY=2026-09-19 python3 scripts/healthcheck.py --json > "$WORK/logs/health-fresh.json")
+FRESH_ASSERT=$(python3 -c "
+import json
+d = json.load(open('$WORK/logs/health-fresh.json'))
+a = [x for x in d['assertions'] if x['name'] == 'freshness-jobs'][0]
+print(a['ok'], a['severity'], d['blocked_legs'].count('assess'))")
+check "the stale job fails freshness-jobs as degraded and blocks no leg" "False degraded 0" "$FRESH_ASSERT"
+
+PUB=$(cd "$WORK" && python3 scripts/freshness_publish.py; echo "rc=$?")
+case "$PUB" in *"publish: not configured"*"rc=0") ok "an unconfigured publisher says so and exits 0" ;;
+  *) bad "unconfigured publisher — got: $PUB" ;; esac
+
+G_BEFORE=$(cd "$WORK" && sha256sum vault/goals/G0001.md | cut -d' ' -f1)
+(cd "$WORK" && DREAMER_TODAY=2026-09-19 python3 scripts/freshness.py --json >/dev/null)
+(cd "$WORK" && python3 scripts/freshness_publish.py >/dev/null)
+G_AFTER=$(cd "$WORK" && sha256sum vault/goals/G0001.md | cut -d' ' -f1)
+check "computing and publishing freshness leaves the goal page byte-identical" "$G_BEFORE" "$G_AFTER"
 
 printf '\n\033[1m== Result ==\033[0m\n'
 printf '  passed: %s\n  failed: %s\n  sandbox: %s\n' "$PASS" "$FAIL" "$WORK"

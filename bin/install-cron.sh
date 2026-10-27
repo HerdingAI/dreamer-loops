@@ -54,7 +54,10 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${NODE_BIN:+:$N
 # assertion registry, no model calls — and when stale it appends a degraded
 # event AND writes to logs/watchdog.log, a channel outside the pipeline it
 # watches. Offset to :12 so it never coincides with the on-the-hour jobs.
-12 * * * * $ROOT/scripts/healthcheck.py --watchdog >> $ROOT/logs/watchdog.log 2>&1
+# The freshness publish is chained AFTER it, as a separate command, so the
+# watchdog itself stays a pure staleness check. Hourly publishing is what lets
+# a reader tell "laptop off" (snapshot old) from "axis stale" (snapshot fresh).
+12 * * * * $ROOT/scripts/healthcheck.py --watchdog >> $ROOT/logs/watchdog.log 2>&1; $ROOT/scripts/freshness_publish.py >> $ROOT/logs/freshness-publish.log 2>&1
 # --- end dreamer ---
 EOF
 
