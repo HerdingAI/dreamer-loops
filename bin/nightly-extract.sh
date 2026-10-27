@@ -59,7 +59,7 @@ fi
     > "$ROOT/logs/.applied-$JOB.json" || die "apply failed"
 
 # 5. Only now mark the batch consumed — a failed apply must be retryable.
-"$PY" "$ROOT/scripts/make_batch.py" --limit "$COUNT" --mark-batch >/dev/null
+printf '%s' "$BATCH_JSON" | "$PY" "$ROOT/scripts/make_batch.py" --mark-json || die "could not mark the batch extracted"
 
 # 6. Fold tonight's matched occurrences into their loops' living threads
 # (CLAUDE.md rule 15). Restricted LLM calls; a deferral or the fold_per_run

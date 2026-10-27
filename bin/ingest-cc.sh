@@ -4,7 +4,8 @@
 # Contract: no arguments. Sweeps the Claude Code projects directory, triages
 # every session, summarises each one that qualifies, and writes one transcript
 # page per session into vault/sources/transcripts/ with source_agent
-# claude-code. Extraction stays the nightly/backfill jobs' business.
+# claude-code (or claude-desktop for the desktop app's Cowork sessions, which
+# share this leg and its cron line). Extraction stays the nightly/backfill jobs' business.
 #
 # It does NOT take the vault lock, for the same reason bin/ingest.sh does not:
 # it is append-only into vault/sources/ via atomic writes, and a running
@@ -19,12 +20,27 @@ arm_heartbeat
 log "start"
 
 # 1. Triage. The scan prints stats on stdout and diagnostics on stderr.
+# Two sources share this leg: Claude Code sessions and Claude desktop app
+# (Cowork) sessions. Both write .cc-input-<sid>.{md,json}; the loop below does
+# not care which produced them, and apply_cc_session.py reads the source agent
+# and the ledger name from the payload.
 LIMIT="${CC_LIMIT:-}"
 SCAN=$("$PY" "$ROOT/scripts/convert_cc_sessions.py" ${LIMIT:+--limit "$LIMIT"}) \
   || die "scan failed"
 ACCEPTED=$(printf '%s' "$SCAN" | "$PY" -c \
   'import json,sys; print(json.load(sys.stdin).get("accepted",0))')
 log "scan: $SCAN"
+
+# A failure here must not cost the Claude Code sessions already queued above.
+if DSCAN=$("$PY" "$ROOT/scripts/convert_desktop_sessions.py" ${LIMIT:+--limit "$LIMIT"}); then
+  DACC=$(printf '%s' "$DSCAN" | "$PY" -c \
+    'import json,sys; print(json.load(sys.stdin).get("accepted",0))')
+  log "desktop scan: $DSCAN"
+  ACCEPTED=$(( ${ACCEPTED:-0} + ${DACC:-0} ))
+else
+  log "desktop scan failed — continuing with Claude Code sessions only"
+  record_event "desktop-scan-failed" "convert_desktop_sessions.py exited non-zero"
+fi
 
 if [[ "${ACCEPTED:-0}" -eq 0 ]]; then
   log "no new sessions — no-op"

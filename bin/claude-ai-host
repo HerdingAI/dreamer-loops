@@ -1,0 +1,10 @@
+#!/bin/sh
+# Chrome native-messaging launcher for the Dreamer Sync extension.
+# Chrome starts this with NO shell environment (no PATH, no profile), so it
+# uses an absolute python: claude_ai_sync.python from config.yaml, falling back
+# to /usr/bin/python3. The config read is a plain sed, not python, because
+# which python to use is the thing being decided.
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PYBIN="$(sed -n 's/^  python:[[:space:]]*\([^[:space:]#]*\).*/\1/p' "$ROOT/config.yaml" | head -n 1)"
+[ -x "$PYBIN" ] || PYBIN=/usr/bin/python3
+exec "$PYBIN" -I "$ROOT/scripts/claude_ai_host.py"

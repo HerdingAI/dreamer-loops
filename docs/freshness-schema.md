@@ -52,9 +52,11 @@ last-known value, not the current one.
 | Axis | Kind | Window |
 |---|---|---|
 | `source.claude-export` | source | 10 days |
+| `source.claude-ai` | source | 36 hours; `info` / `disabled` while `claude_ai_sync.extension_id` is empty; `stale` with reason `needs re-login` etc. when the latest sync failed (see `claude-ai-sync-state.md`) |
 | `source.cc-sessions` | source | 3 days |
 | `source.owner-writes` | source | reported only |
 | `job.ingest-cc` | job | 28 hours |
+| `job.sync-claude-ai` | job | 28 hours; `info` / `disabled` while `claude_ai_sync.extension_id` is empty |
 | `job.nightly-extract` | job | 28 hours |
 | `job.nightly-assess` | job | 28 hours |
 | `job.night-cycle` | job | 28 hours |
