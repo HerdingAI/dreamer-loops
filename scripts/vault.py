@@ -46,6 +46,12 @@ class Loop:
     route: str = ""
     conclusion: str = ""
     tags: list[str] = field(default_factory=list)
+    # Set when a spine conclusion is applied (CLAUDE.md rule 5b). Not part of
+    # the state machine: no transition reads it.
+    problem_type: str = ""
+    # Set when the owner answers the question a provisional conclusion was
+    # waiting on (rule 14). Cleared by the next conclusion or serve.
+    reresearch_requested: str = ""
     body: str = ""
     path: Path | None = None
     type: str = "loop"
@@ -66,13 +72,15 @@ class Loop:
             route=str(fm.get("route") or ""),
             conclusion=str(fm.get("conclusion") or ""),
             tags=list(fm.get("tags") or []),
+            problem_type=str(fm.get("problem_type") or ""),
+            reresearch_requested=str(fm.get("reresearch_requested") or ""),
             body=body,
             path=path,
             type=str(fm.get("type") or "loop"),
         )
 
     def frontmatter(self) -> dict:
-        return {
+        fm = {
             "type": "loop",
             "id": self.id,
             "status": self.status,
@@ -86,6 +94,13 @@ class Loop:
             "conclusion": self.conclusion,
             "tags": self.tags,
         }
+        # Written only when set: adding a key to every loop page would be a
+        # diff on a night of unrelated input (rule 2).
+        if self.problem_type:
+            fm["problem_type"] = self.problem_type
+        if self.reresearch_requested:
+            fm["reresearch_requested"] = self.reresearch_requested
+        return fm
 
     def save(self) -> None:
         if self.status not in STATUSES:
@@ -453,6 +468,12 @@ def reresearch_gate(loop: Loop, ref: _dt.date) -> tuple[bool, str]:
     Returns (eligible, reason_if_served).
     """
     if not loop.conclusion:
+        return True, ""
+    # The one exemption from the cooldown: the conclusion was provisional,
+    # waiting on the owner, and the owner has answered. That is new primary
+    # evidence asked for by name — not the self-citing churn the cooldown
+    # exists to stop.
+    if loop.reresearch_requested:
         return True, ""
     cdate = conclusion_date(loop)
     if cdate is None:

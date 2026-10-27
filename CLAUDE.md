@@ -27,6 +27,7 @@ occurrences:
 route: wisdom             # wisdom | web | past-reasoning | decision-only | mixed
 conclusion: ""            # wikilink, set only when a conclusion page exists
 tags: [architecture]      # controlled vocabulary ONLY — see rule 4
+problem_type: decision    # present only once a spine conclusion is applied — rule 5b
 ```
 
 The page body also carries one `## Thread (derived — hypothesis, not
@@ -131,6 +132,58 @@ Three constraints survive the escalation:
 - If the web leg is *also* empty, say so and set `confidence: low`. "Neither
   the library nor the web resolved this" is an honest result. Inventing a
   synthesis to fill the page is not.
+
+### 5b. Problem type and the solution spine
+
+The route says where to look. The **problem type** says what kind of answer a
+loop needs. Classify it into exactly one, independently of the route:
+
+- **`factual`** — what is true? An answer exists somewhere.
+- **`diagnostic`** — why does this keep happening?
+- **`design`** — what should I build or set up?
+- **`decision`** — which of these should I choose?
+- **`dilemma`** — how do I hold two things that pull against each other?
+
+The type is decided from the loop's title and the owner's words before any
+research, and does not change afterwards: findings change the answer, not the
+kind of question. On genuine uncertainty choose the type that requires more
+stages (`dilemma` > `design` > `diagnostic` > `decision` > `factual`): an
+unneeded stage costs words, a missing one costs the answer.
+
+Every type walks the same six stages — Define, Diagnose, Options, Evaluate,
+Recommend, Check — at the depth this table sets (`scripts/spine.py` holds it;
+the prompt is rendered from it):
+
+| | Define | Diagnose | Options | Evaluate | Recommend | Check |
+|---|---|---|---|---|---|---|
+| `factual` | brief | — | — | — | full | brief |
+| `diagnostic` | full | full | brief | brief | full | full |
+| `design` | full | brief | full | full | full | brief |
+| `decision` | brief | — | full | full | full | brief |
+| `dilemma` | full | brief | full | brief | full | full |
+
+`full` carries the effort, `brief` is one to three sentences, `—` is omitted.
+Recommend is the page's `## Synthesis`; existing headings keep their names and
+order, and the spine only adds headings.
+
+Three things the spine never licenses:
+
+- **An uncited claim.** Every Diagnose entry is a claim under rules 8 and 13.
+  An assumption is labelled as one and is never evidence.
+- **An invented criterion.** A criterion is the owner's — a real phrase quoted
+  from a Human turn of one of the loop's own conversations — or it is absent.
+  What the owner said about a different question, and anything Dreamer wrote,
+  is never a criterion. With none on record, the
+  recommendation is provisional and the owner is asked.
+- **A decision.** Dreamer recommends — naming one listed option, which may be
+  "Leave it" — and only the owner resolves a loop. For a
+  dilemma the recommendation is the smallest experiment that would teach the
+  owner something.
+
+`scripts/apply_conclusion.py` verifies all of this mechanically and may lower
+`confidence` to `low`; the spine never raises it. `decision-only` keeps zero
+research calls and takes the spine's shape from what is already in the prompt.
+The spine is asked for only when `solving.enabled` is true.
 
 ## 6. Meta-idea filter (extraction)
 
@@ -275,7 +328,13 @@ A loop whose `conclusion` is set is re-research eligible **only** if:
 - a new occurrence contradicts the conclusion, falls outside its scope, or hits
   one of its listed "Open sub-questions", or
 - the conclusion is `web`/`mixed`-routed and older than
-  `research.web_conclusion_stale_days` (external facts rot; principles don't).
+  `research.web_conclusion_stale_days` (external facts rot; principles don't), or
+- the conclusion is provisional (rule 5b) and the owner has since answered the
+  question it was waiting on. The conversation they answered in becomes an
+  occurrence of the loop and the loop is marked `reresearch_requested`
+  (`scripts/questions.py apply_criteria_answers`). This is the one case exempt
+  from the cooldown below: it is new primary evidence that was asked for by
+  name. The next conclusion, or a serve, clears the mark.
 
 Otherwise the resurfacing appends the occurrence and bumps relevance, and the
 existing conclusion is **served** — zero research calls, no superseding page —

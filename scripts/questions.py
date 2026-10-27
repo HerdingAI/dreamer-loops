@@ -350,6 +350,77 @@ def answer_question(
         raise ValueError(f"Question {question_id} not found in queue")
 
 
+_ROLE_MARK = re.compile(r"^(##\s+Human\b|Human:)", re.I | re.M)
+
+
+def _transcript_quoting(quote: str, not_before: _dt.date | None,
+                        min_chars: int) -> tuple[str, _dt.date] | None:
+    """The newest transcript, dated on or after `not_before`, whose Human
+    turns contain `quote`. An answer given today cannot be 'found' in a
+    conversation from before the question existed."""
+    if len(normalize_quote(quote)) < min_chars:
+        return None
+    base, vault = p("sources"), p("vault")
+    if not base.exists():
+        return None
+    for f in sorted(base.rglob("*.md"), key=lambda x: x.name, reverse=True):
+        m = re.match(r"(\d{4}-\d{2}-\d{2})", f.name)
+        date = as_date(m.group(1)) if m else None
+        if date is None or (not_before and date < not_before):
+            continue
+        try:
+            text = f.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if not _ROLE_MARK.search(text):
+            continue
+        if quote_in(quote, normalize_quote(extract_human_turns(text))):
+            link = f"[[{f.resolve().relative_to(vault.resolve()).with_suffix('').as_posix()}]]"
+            return link, date
+    return None
+
+
+def apply_criteria_answers() -> dict:
+    """Bring an answered `criteria` question back as evidence (rule 14).
+
+    A provisional conclusion asks the owner what matters in a choice. When
+    they answer, the conversation they answered in becomes an occurrence of
+    the loop — which reopens it — and the loop is marked for re-research, so
+    the cooldown does not sit on an answer that was asked for. Until that
+    conversation is ingested there is nothing to cite, and the question
+    simply waits. Idempotent: an applied question is never applied twice."""
+    import vault as V
+    out = {"applied": 0, "waiting": 0}
+    min_chars = int((CFG.get("mcp") or {}).get("owner_write_quote_min_chars", 8))
+    with state_lock(p("meta") / "wiki.lock"):
+        questions = load_questions()
+        loops = {l.id: l for l in V.load_loops()}
+        changed = False
+        for q in questions:
+            if (q.get("kind") != "criteria" or q.get("status") != "answered"
+                    or q.get("applied_at")):
+                continue
+            loop = loops.get(q.get("loop_id"))
+            quote = str(q.get("last_response") or q.get("answer") or "")
+            found = (_transcript_quoting(quote, as_date(q.get("created_at")), min_chars)
+                     if loop else None)
+            if not found:
+                out["waiting"] += 1
+                continue
+            link, date = found
+            V.add_occurrence(loop, link, date)
+            loop = V.Loop.from_path(loop.path)
+            loop.reresearch_requested = f"criteria answered {date.isoformat()}"
+            loop.save()
+            q["applied_at"] = _dt.datetime.now().isoformat(timespec="seconds")
+            q["occurrence"] = link
+            changed = True
+            out["applied"] += 1
+        if changed:
+            save_questions(questions)
+    return out
+
+
 def defer_question(
     question_id: str,
     days: int | None = None,
