@@ -236,6 +236,13 @@ _SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
      re.compile(r"(?i)(?P<pre>\b(?:api[_-]?key|secret|passwd|password|access[_-]?token|"
                 r"client[_-]?secret)\b\s*[=:]\s*['\"]?)(?P<secret>[A-Za-z0-9_\-\.\/\+]{8,})"
                 r"(?P<post>['\"]?)")),
+    # A credential stated in prose: "user alice , password Example_0000! Port : 5432".
+    # No `=` or `:` for generic-assignment to hang on. The lookahead demands a
+    # digit or symbol in the value so "password reset flow" / "password
+    # management" survive.
+    ("password-phrase",
+     re.compile(r"(?i)(?P<pre>\b(?:password|passwd)\s+(?:is\s+)?)"
+                r"(?P<secret>(?=[^\s]*[\d_!@#$%^&*])[^\s\"',;]{8,})(?P<post>)")),
 ]
 
 

@@ -119,8 +119,9 @@ class ConverterTest(unittest.TestCase):
         self.assertEqual(len(files), 1, "must replace, not fork")
         self.assertIn("second", files[0].read_text(encoding="utf-8"))
 
-    # --- DoD: a renamed+grown conversation must not leave a stale twin ---
-    def test_rename_removes_stale_path(self) -> None:
+    # --- DoD: a renamed+grown conversation keeps ONE file at its ORIGINAL path ---
+    # (was: moved to the new slug; that broke every occurrence wikilink)
+    def test_rename_keeps_original_path(self) -> None:
         c = conversation("u1", "Old Name", "2026-07-14T10:00:00Z",
                          "2026-07-14T11:00:00Z", [("human", "x")])
         self._convert(self._write_export([c]))
@@ -128,7 +129,7 @@ class ConverterTest(unittest.TestCase):
                                "2026-07-14T12:00:00Z", [("human", "x"), ("assistant", "y")])
         self._convert(self._write_export([renamed]))
         files = sorted(f.name for f in self.out.rglob("*.md"))
-        self.assertEqual(files, ["2026-07-14--new-name.md"])
+        self.assertEqual(files, ["2026-07-14--old-name.md"])
 
     # --- DoD: malformed record is logged and skipped without aborting ---
     def test_malformed_record_does_not_abort(self) -> None:
@@ -151,14 +152,14 @@ class ConverterTest(unittest.TestCase):
     def test_secrets_redacted_before_write(self) -> None:
         secret_text = (
             "here is the key AKIAIOSFODNN7EXAMPLE and the db "
-            "postgresql://alice:hunter2pass@localhost:5432/testdb"
+            "postgresql://alice:testpass0000@localhost:5432/testdb"
         )
         c = conversation("u1", "Leaky", "2026-07-14T10:00:00Z",
                          "2026-07-14T11:00:00Z", [("human", secret_text)])
         stats = self._convert(self._write_export([c]))
         blob = "\n".join(f.read_text(encoding="utf-8") for f in self.out.rglob("*.md"))
         self.assertNotIn("AKIAIOSFODNN7EXAMPLE", blob)
-        self.assertNotIn("hunter2pass", blob)
+        self.assertNotIn("testpass0000", blob)
         self.assertIn("[REDACTED:aws-access-key]", blob)
         self.assertIn("[REDACTED:db-dsn-password]", blob)
         self.assertGreaterEqual(sum(stats["redactions"].values()), 2)
@@ -213,7 +214,7 @@ class ConverterTest(unittest.TestCase):
                 "uuid": "m0", "sender": "human", "text": "see attached",
                 "content": [{"type": "text", "text": "see attached"}],
                 "attachments": [{"file_name": "notes.txt",
-                                 "extracted_content": "token ghp_" + "a" * 36}],
+                                 "extracted_content": "token ghp_" + "0" * 36}],
                 "files": [],
             }],
         }

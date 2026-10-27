@@ -94,7 +94,7 @@ def page_text(payload: dict, summary: dict) -> str:
     fm = [
         "---",
         "type: transcript",
-        "source_agent: claude-code",
+        f"source_agent: {payload.get('source_agent') or 'claude-code'}",
         f"session_id: {payload['session_id']}",
         f"project: {payload['project']}",
         f"date: {payload['date']}",
@@ -221,6 +221,12 @@ def record_failure(payload: dict, reason: str, *, ledger_path: Path) -> None:
     atomic_write_json(ledger_path, ledger)
 
 
+def default_ledger_name(payload: dict) -> str:
+    """Each source keeps its own ledger. The payload names it; Claude Code
+    payloads predate the field and default to the original."""
+    return Path(str(payload.get("ledger") or "cc-ingested.json")).name
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
@@ -236,9 +242,9 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     sources = args.sources or p("sources")
-    ledger = args.ledger or (p("meta") / "cc-ingested.json")
 
     payload = json.loads(args.payload.read_text(encoding="utf-8"))
+    ledger = args.ledger or (p("meta") / default_ledger_name(payload))
     try:
         path = apply_session(payload,
                              args.summary.read_text(encoding="utf-8"),

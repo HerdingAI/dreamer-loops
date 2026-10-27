@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Dreamer Sync",
+  "version": "1.0.0",
+  "description": "Daily, incremental copy of your claude.ai chats to Dreamer on this machine (native messaging host).",
+  "permissions": [
+    "alarms",
+    "nativeMessaging",
+    "cookies",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://claude.ai/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Dreamer Sync: sync claude.ai now"
+  }
+}

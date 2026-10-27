@@ -429,7 +429,11 @@ def tool_log_resurfacing(loop_id: str, note: str) -> str:
 
     # loop_id is regex-validated above, so it cannot traverse. uuid4 keeps
     # concurrent callers from colliding.
-    stamp = _dt.datetime.now()
+    # The date is the owner's "today" (DREAMER_TODAY-aware, like every other
+    # stamp the vault writes): it becomes the occurrence date, which drives
+    # last_seen, decay and recency. A raw wall clock here lets a pinned-date
+    # run disagree with the file it just queued.
+    stamp = _dt.datetime.combine(today(), _dt.datetime.now().time())
     name = f"{stamp:%Y-%m-%d}--{loop_id}--{uuid.uuid4().hex[:8]}.md"
     body = (
         "---\n"

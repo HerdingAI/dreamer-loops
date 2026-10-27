@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Claude export -> one Markdown transcript per conversation (§6.1).
 
-Written against the REAL export schema, verified 2026-08-01 against an 887-
-conversation dump. The v2.0 spec (and §12) described `id` / `messages`, which
-do not exist. Actual shape:
+Written against the real export schema. The v2.0 spec (and §12) described
+`id` / `messages`, which do not exist. Actual shape:
 
     [ { uuid, name, summary, created_at, updated_at, account,
         chat_messages: [ { uuid, sender, text, content: [...],
@@ -11,7 +10,7 @@ do not exist. Actual shape:
                            created_at, updated_at } ] } ]
 
 Two traps this handles that a naive `.text` reader would not:
-  1. 104 messages in the real archive carry an EMPTY `text` but a populated
+  1. Some messages carry an EMPTY `text` but a populated
      `content[]`. Reading `.text` alone silently drops them.
   2. `content[]` block types include thinking / tool_use / tool_result /
      token_budget / voice_note. Tool noise is not reasoning the owner did, and
@@ -32,9 +31,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import make_batch  # noqa: E402
 from dreamer_common import (  # noqa: E402
-    CFG, as_date, atomic_write, atomic_write_json, log, p, read_json, redact,
-    safe_relpath, slugify,
+    CFG, as_date, atomic_write, atomic_write_json, log, p, parse_frontmatter,
+    read_json, redact, safe_relpath, slugify,
 )
 
 # Content block types that represent actual reasoning by human or assistant.
@@ -107,23 +107,85 @@ def message_text(msg: dict) -> str:
     return "\n\n".join(parts).strip()
 
 
-def render(conv: dict) -> tuple[str, dict[str, int]]:
-    """Return (markdown_body, redaction_counts)."""
+def new_turns_marker(n: int) -> str:
+    """Divider before the turns added since the last extraction.
+
+    Deliberately a blockquote, not a `## ` heading: spine, questions and
+    probe_recall parse `## Human` / `## Assistant` headings as turn boundaries.
+    """
+    return (f"> **[NEW TURNS START HERE — from message {n}. Everything above "
+            f"was already extracted.]**")
+
+
+def render(conv: dict, new_from: int | None = None
+           ) -> tuple[str, dict[str, int], bool]:
+    """Return (markdown_body, redaction_counts, marker_placed).
+
+    `new_from` is a 0-based message index; the marker goes right before the
+    first RENDERED message at or after it. If every message from there on
+    renders empty there is nothing new to extract and no marker is placed.
+    """
     lines: list[str] = []
     total_counts: dict[str, int] = {}
-    for msg in conv.get("chat_messages") or []:
+    placed = False
+    for idx, msg in enumerate(conv.get("chat_messages") or []):
         if not isinstance(msg, dict):
             continue
         body = message_text(msg)
         if not body:
             continue
+        if new_from is not None and not placed and idx >= new_from:
+            lines.append(new_turns_marker(new_from))
+            placed = True
         body, counts = redact(body)
         for k, v in counts.items():
             total_counts[k] = total_counts.get(k, 0) + v
         sender = msg.get("sender", "unknown")
         role = {"human": "Human", "assistant": "Assistant"}.get(sender, sender.title())
         lines.append(f"## {role}\n\n{body}")
-    return "\n\n".join(lines), total_counts
+    return "\n\n".join(lines), total_counts, placed
+
+
+def page_key(out_dir: Path, rel: str) -> str:
+    """Vault-relative, suffix-free key (as in extracted.json) for a page."""
+    try:
+        key = str((out_dir / rel).relative_to(p("vault")))
+    except ValueError:
+        # Output dir outside the vault (ad-hoc --out): same key shape as the
+        # default sources dir, so the lookup is still well-defined.
+        key = f"sources/transcripts/{rel}"
+    return key.removesuffix(".md")
+
+
+def extraction_boundary(prior: dict | None, key: str, old_file: Path,
+                        new_count: int) -> int | None:
+    """new_from_message for a conversation that is being replaced, or None.
+
+    It is the message count at the last extraction, when there is new material
+    after it. Sources, in order: extracted_through (exact); for a legacy `done`
+    entry, the old page's message_count (read before the overwrite); for a page
+    already waiting, its own new_from_message (it grew twice before the
+    extractor got to it, so the first boundary stands).
+    """
+    if not prior:
+        return None
+    in_done = key in make_batch.extracted_set()
+    try:
+        old_fm, _ = parse_frontmatter(old_file.read_text(encoding="utf-8"))
+    except OSError:
+        old_fm = {}
+    base = make_batch.extracted_through().get(key)
+    if base is None and in_done:
+        for cand in (old_fm.get("message_count"), prior.get("message_count")):
+            if isinstance(cand, int):
+                base = cand
+                break
+    if base is None and not in_done:
+        cand = old_fm.get("new_from_message")
+        base = cand if isinstance(cand, int) else None
+    if base is None or new_count <= base:
+        return None
+    return base
 
 
 def convert(target: Path, out_dir: Path, limit: int | None, dry_run: bool,
@@ -169,23 +231,38 @@ def convert(target: Path, out_dir: Path, limit: int | None, dry_run: bool,
                 stats["skipped_dedupe"] += 1
                 continue
 
-            body, counts = render(conv)
+            n_msgs = len(conv.get("chat_messages") or [])
+            old_path = prior.get("path") if prior else None
+            if old_path and (out_dir / old_path).exists():
+                # A known conversation keeps its file whatever its title does
+                # now: moving it broke every occurrence wikilink to the old
+                # path and orphaned its extracted.json entry.
+                rel = Path(old_path)
+            else:
+                slug = slugify(conv.get("name") or "untitled")
+                rel = safe_relpath(f"{created:%Y}", f"{created:%m}",
+                                   f"{created:%Y-%m-%d}--{slug}.md")
+                # Two different conversations can share a date AND a title —
+                # real archives do this routinely (the same title twice in
+                # one day). Without disambiguation the
+                # second silently overwrites the first, and the ledger marks
+                # both ingested so the lost one is never re-emitted. Suffix
+                # with the conversation id.
+                if rel_claimed_by_other(ledger, str(rel), cid):
+                    rel = safe_relpath(f"{created:%Y}", f"{created:%m}",
+                                       f"{created:%Y-%m-%d}--{slug}--{cid[:8]}.md")
+            dest = out_dir / rel
+            key = page_key(out_dir, str(rel))
+
+            # Extract only what is new: the boundary is read from the OLD page
+            # and the extraction ledger before the page is overwritten.
+            new_from = extraction_boundary(prior, key, dest, n_msgs)
+            body, counts, placed = render(conv, new_from)
             if not body.strip():
                 stats["skipped_empty"] += 1
                 continue
-
-            slug = slugify(conv.get("name") or "untitled")
-            rel = safe_relpath(f"{created:%Y}", f"{created:%m}",
-                               f"{created:%Y-%m-%d}--{slug}.md")
-            # Two different conversations can share a date AND a title — real
-            # archives do this routinely ("Cheapest plan for 100k requests"
-            # twice in one day). Without disambiguation the second silently
-            # overwrites the first, and the ledger marks both ingested so the
-            # lost one is never re-emitted. Suffix with the conversation id.
-            if rel_claimed_by_other(ledger, str(rel), cid):
-                rel = safe_relpath(f"{created:%Y}", f"{created:%m}",
-                                   f"{created:%Y-%m-%d}--{slug}--{cid[:8]}.md")
-            dest = out_dir / rel
+            if not placed:
+                new_from = None  # nothing new renders, so nothing to re-extract
 
             fm = [
                 "---",
@@ -195,7 +272,8 @@ def convert(target: Path, out_dir: Path, limit: int | None, dry_run: bool,
                 f"date: {created.isoformat()}",
                 f"updated_at: {updated}",
                 f'title: "{(conv.get("name") or "Untitled").replace(chr(34), chr(39))}"',
-                f"message_count: {len(conv.get('chat_messages') or [])}",
+                f"message_count: {n_msgs}",
+                *([f"new_from_message: {new_from}"] if new_from is not None else []),
                 "---",
                 "",
                 f"# {conv.get('name') or 'Untitled'}",
@@ -205,16 +283,15 @@ def convert(target: Path, out_dir: Path, limit: int | None, dry_run: bool,
             content = "\n".join(fm) + body + "\n"
 
             if not dry_run:
-                # A conversation that grew replaces its prior file; if the slug
-                # changed too, remove the stale path so links do not fork.
-                old_path = prior.get("path") if prior else None
-                if old_path and old_path != str(rel):
-                    stale = out_dir / old_path
-                    if stale.exists():
-                        stale.unlink()
+                if new_from is not None:
+                    # Queue it again BEFORE the page changes: a crash between
+                    # the two re-extracts old text (harmless, occurrences are
+                    # idempotent), the reverse order would lose the new turns.
+                    make_batch.unmark_extracted(key)
                 atomic_write(dest, content)
                 ledger[cid] = {"updated_at": updated, "path": str(rel),
-                               "date": created.isoformat()}
+                               "date": created.isoformat(),
+                               "message_count": n_msgs}
 
             stats["replaced" if prior else "written"] += 1
             stats["emitted"] += 1

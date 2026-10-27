@@ -10,8 +10,10 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -20,7 +22,7 @@ import dreamer_common as dc  # noqa: E402
 import freshness as F  # noqa: E402
 
 NOW = _dt.datetime(2026, 10, 3, 12, 0, 0)
-NIGHTLY = ("ingest-cc", "nightly-extract", "nightly-assess", "night-cycle", "weekly-dream")
+NIGHTLY = ("sync-claude-ai", "ingest-cc", "nightly-extract", "nightly-assess", "night-cycle", "weekly-dream")
 
 
 def ago(hours: float) -> str:
@@ -47,11 +49,16 @@ class FreshCase(unittest.TestCase):
         dc.CFG["paths"].update({k: str(v) for k, v in paths.items()})
         self._orig_now = os.environ.get("DREAMER_NOW")
         os.environ["DREAMER_NOW"] = NOW.isoformat()
+        # The claude.ai axes are judged only once the sync is set up (an ID is
+        # configured); the example config ships it empty.
+        self._orig_sync = dict(dc.CFG.get("claude_ai_sync") or {})
+        dc.CFG.setdefault("claude_ai_sync", {})["extension_id"] = "a" * 32
         self.seed_fresh()
 
     def tearDown(self) -> None:
         dc.CFG["paths"].clear()
         dc.CFG["paths"].update(self._orig)
+        dc.CFG["claude_ai_sync"] = self._orig_sync
         if self._orig_now is None:
             os.environ.pop("DREAMER_NOW", None)
         else:
@@ -81,6 +88,15 @@ class FreshCase(unittest.TestCase):
                                                "mtime": (NOW - _dt.timedelta(hours=5)).timestamp()}})
         self.write("extracted.json", {"done": []})
         self.write("fold-pending.json", [])
+        self.sync_state("ok", last_ok=1)
+
+    def sync_state(self, status: str, last_ok: float | None, last_attempt: float = 1,
+                   **extra) -> None:
+        self.write("claude-ai-sync.json", {
+            "last_attempt": ago(last_attempt),
+            "last_ok": ago(last_ok) if last_ok is not None else None,
+            "status": status, "detail": "SECRET-DETAIL /home/x", "cursor": ago(5),
+            "fetched": 3, "converted": 2, **extra})
 
     def set_job(self, name: str, **kw) -> None:
         data = json.loads((self.meta / "heartbeats.json").read_text(encoding="utf-8"))
@@ -111,7 +127,7 @@ class ShapeTest(FreshCase):
 
     def test_every_spec_axis_is_present_with_the_full_key_set(self) -> None:
         snap = F.collect(NOW)
-        want = {"source.claude-export", "source.cc-sessions", "source.owner-writes",
+        want = {"source.claude-export", "source.claude-ai", "job.sync-claude-ai", "source.cc-sessions", "source.owner-writes",
                 "job.ingest-cc", "job.nightly-extract", "job.nightly-assess",
                 "job.night-cycle", "job.weekly-dream", "job.decay-archive", "job.healthcheck",
                 "converge.extraction", "converge.assessment", "converge.folds",
@@ -389,6 +405,174 @@ class ReviewFixTest(FreshCase):
         H._STATE_CACHE.clear()
         self.set_job("nightly-extract", ok_hours_ago=47.3)
         self.assertEqual(H.assert_freshness_jobs()[1], first)
+
+
+class ClaudeAiDisabledTest(FreshCase):
+    """With no extension ID configured the sync is not set up: every claude.ai
+    axis reports info/disabled, never stale, whatever state files exist."""
+
+    AXES = ("source.claude-ai", "job.sync-claude-ai")
+
+    def disable(self, value) -> None:
+        dc.CFG["claude_ai_sync"]["extension_id"] = value
+
+    def test_enabled_control_is_judged(self) -> None:
+        self.assertEqual(self.axis("source.claude-ai")["status"], "ok")
+        self.assertEqual(self.axis("job.sync-claude-ai")["status"], "ok")
+
+    def test_empty_id_reads_info_disabled_on_every_claude_ai_axis(self) -> None:
+        for value in ("", None):
+            self.disable(value)
+            for name in self.AXES:
+                a = self.axis(name)
+                self.assertEqual((a["status"], a["reason"]), ("info", "disabled"), (name, value))
+                self.assertNotIn(a["status"], F.FAILING)
+
+    def test_disabled_ignores_a_missing_state_file_and_a_missing_heartbeat(self) -> None:
+        self.disable("")
+        (self.meta / "claude-ai-sync.json").unlink()
+        self.set_job("sync-claude-ai", ok_hours_ago=500)
+        for name in self.AXES:
+            self.assertEqual(self.axis(name)["status"], "info", name)
+        self.assertEqual(F.collect(NOW)["overall"], "ok")
+
+    def test_no_claude_ai_sync_block_at_all_is_disabled_too(self) -> None:
+        dc.CFG.pop("claude_ai_sync")
+        for name in self.AXES:
+            self.assertEqual(self.axis(name)["reason"], "disabled", name)
+
+
+class ClaudeAiSyncTest(FreshCase):
+    """source.claude-ai is judged from the sync job's state file. Each case
+    has a positive control (ok) so a bad fixture failing means something."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        H._STATE_CACHE.clear()
+
+    def test_ok_recent_is_ok_and_shows_cursor_and_count(self) -> None:
+        a = self.axis("source.claude-ai")
+        self.assertEqual(a["status"], "ok")
+        self.assertIn("cursor", a["reason"])
+        self.assertIn("fetched 3", a["reason"])
+        self.assertEqual(a["last_arrival"], ago(5))
+        self.assertTrue(H.assert_freshness_sources()[0])
+
+    def test_reason_shows_the_cursor_in_utc_not_naive_local(self) -> None:
+        # The extension writes the cursor as UTC "...Z". Shown as naive local
+        # time it would read hours off with no zone.
+        self.sync_state("ok", last_ok=2, cursor="2026-10-02T08:20:10.250000Z")
+        try:
+            with mock.patch.dict(os.environ, {"TZ": "Asia/Kolkata"}):
+                time.tzset()
+                a = self.axis("source.claude-ai")
+        finally:
+            time.tzset()  # back to the restored environment's zone
+        self.assertIn("cursor 2026-10-02T08:20:10Z", a["reason"])
+
+    # -- login expiry (the extension reports the sessionKey cookie's expiry,
+    # never its value): warn before the monthly re-login breaks the sync.
+    def expiry(self, days: float) -> str:
+        return (NOW + _dt.timedelta(days=days)).isoformat(timespec="seconds")
+
+    def test_login_far_from_expiry_is_ok_and_shows_the_date(self) -> None:
+        self.sync_state("ok", last_ok=1, login_expires_at=self.expiry(20))
+        a = self.axis("source.claude-ai")
+        self.assertEqual(a["status"], "ok")
+        self.assertIn("login until 2026-10-23", a["reason"])
+
+    def test_login_inside_the_warning_window_is_stale_before_anything_breaks(self) -> None:
+        self.sync_state("ok", last_ok=1, login_expires_at=self.expiry(2))
+        a = self.axis("source.claude-ai")
+        self.assertIn(a["status"], F.FAILING)
+        self.assertIn("claude.ai login expires in 2.0 days", a["reason"])
+        self.assertIn("log out and back in", a["reason"])
+
+    def test_expired_login_is_stale(self) -> None:
+        self.sync_state("ok", last_ok=1, login_expires_at=self.expiry(-0.1))
+        a = self.axis("source.claude-ai")
+        self.assertIn(a["status"], F.FAILING)
+        self.assertIn("claude.ai login expired", a["reason"])
+
+    def test_no_login_cookie_reported_is_stale(self) -> None:
+        # The extension reports null when Chrome holds no claude.ai login:
+        # that is caught on the hourly tick, before the next due run.
+        self.sync_state("ok", last_ok=1, login_expires_at=None)
+        a = self.axis("source.claude-ai")
+        self.assertIn(a["status"], F.FAILING)
+        self.assertIn("no claude.ai login in Chrome", a["reason"])
+
+    def test_state_without_the_field_keeps_the_old_verdict(self) -> None:
+        # An older extension never sends it: no warning, no failure.
+        self.sync_state("ok", last_ok=1)
+        a = self.axis("source.claude-ai")
+        self.assertEqual(a["status"], "ok")
+        self.assertNotIn("login", a["reason"])
+
+    def test_warning_window_comes_from_config(self) -> None:
+        self.sync_state("ok", last_ok=1, login_expires_at=self.expiry(2))
+        with mock.patch.dict(dc.CFG["freshness"], {"claude_ai_login_warn_days": 1}):
+            self.assertEqual(self.axis("source.claude-ai")["status"], "ok")
+
+    def test_a_failed_run_still_leads_with_its_own_problem(self) -> None:
+        self.sync_state("needs_login", last_ok=2, login_expires_at=self.expiry(2))
+        a = self.axis("source.claude-ai")
+        self.assertIn(a["status"], F.FAILING)
+        self.assertTrue(a["reason"].startswith("needs re-login"), a["reason"])
+
+    def test_needs_login_is_not_ok_even_though_last_ok_is_recent(self) -> None:
+        self.sync_state("needs_login", last_ok=2, last_attempt=1)
+        a = self.axis("source.claude-ai")
+        self.assertIn(a["status"], F.FAILING)
+        self.assertIn("needs re-login", a["reason"])
+        ok, detail = H.assert_freshness_sources()
+        self.assertFalse(ok)
+        self.assertIn("source.claude-ai", detail)
+
+    def test_every_failure_status_is_not_ok(self) -> None:
+        for status in ("blocked", "schema_changed", "error", "made-up"):
+            self.sync_state(status, last_ok=2)
+            a = self.axis("source.claude-ai")
+            self.assertIn(a["status"], F.FAILING, status)
+            self.assertNotIn("SECRET-DETAIL", a["reason"])
+
+    def test_ok_but_last_ok_older_than_the_window_is_stale(self) -> None:
+        self.sync_state("ok", last_ok=40)
+        self.assertEqual(self.axis("source.claude-ai")["status"], "stale")
+        self.assertFalse(H.assert_freshness_sources()[0])
+
+    def test_just_inside_the_window_is_ok(self) -> None:
+        self.sync_state("ok", last_ok=35)
+        self.assertEqual(self.axis("source.claude-ai")["status"], "ok")
+
+    def test_missing_file_is_never(self) -> None:
+        (self.meta / "claude-ai-sync.json").unlink()
+        self.assertEqual(self.axis("source.claude-ai")["status"], "never")
+        self.assertFalse(H.assert_freshness_sources()[0])
+
+    def test_ok_with_no_last_ok_is_never(self) -> None:
+        self.sync_state("ok", last_ok=None)
+        self.assertEqual(self.axis("source.claude-ai")["status"], "never")
+
+    def test_garbage_is_not_ok_and_does_not_crash(self) -> None:
+        for raw in ("{not json", "[]", "null", ""):
+            (self.meta / "claude-ai-sync.json").write_text(raw, encoding="utf-8")
+            a = self.axis("source.claude-ai")
+            self.assertIn(a["status"], F.FAILING, raw)
+            H._STATE_CACHE.clear()
+            self.assertFalse(H.assert_freshness_sources()[0], raw)
+        self.write("claude-ai-sync.json", {"status": "ok", "last_ok": "garbage",
+                                           "fetched": "x", "cursor": 5})
+        self.assertIn(self.axis("source.claude-ai")["status"], F.FAILING)
+
+    def test_job_axis_follows_the_heartbeat(self) -> None:
+        self.assertEqual(self.axis("job.sync-claude-ai")["status"], "ok")
+        self.set_job("sync-claude-ai", ok_hours_ago=40)
+        self.assertEqual(self.axis("job.sync-claude-ai")["status"], "stale")
+
+    def test_threshold_comes_from_config(self) -> None:
+        self.assertEqual(self.axis("source.claude-ai")["threshold_hours"],
+                         float(F.cfg("freshness", "claude_ai_sync_max_age_hours")))
 
 
 if __name__ == "__main__":

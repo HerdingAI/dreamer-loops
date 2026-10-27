@@ -40,6 +40,7 @@ cp "$SRC"/.gitignore "$WORK/"
 cp "$SRC"/tests/fake_claude.py "$WORK/tests/"
 cp "$SRC"/tests/fixtures/script.json "$WORK/tests/fixtures/"
 cp "$SRC"/tests/fixtures/export.json "$WORK/tests/fixtures/"
+mkdir -p "$WORK-desktop-sessions"
 mkdir -p "$WORK"/vault/{loops,goals,conclusions,concepts,archive,digests,sources/transcripts,inbox/resurfacings,.vault-meta}
 
 # U6 — the sim runs with a FROZEN tag vocabulary so the extraction tag path is
@@ -65,6 +66,27 @@ cfg["paths"] = {
 }
 # Outside the repo, as ~/.claude/projects is in production.
 cfg.setdefault("corpora", {})["claude_code_sessions"] = f"{root}-cc-projects"
+# Same for the desktop-app source: left at its config.yaml default it is the
+# real ~/.config/Claude, and the sandbox would ingest the user's own sessions.
+# An empty dir keeps the run hermetic.
+cfg["corpora"]["claude_desktop_sessions"] = f"{root}-desktop-sessions"
+# Hermeticity: no corpus path may resolve outside the sandbox. The two session
+# corpora must sit inside it whether or not they exist; any other corpus path
+# that exists on disk must too.
+import os
+box = os.path.realpath(root)
+def _inside(path):
+    return os.path.realpath(os.path.expanduser(path)).startswith(box)
+bad = []
+for key, val in cfg["corpora"].items():
+    for path in (val if isinstance(val, list) else [val]):
+        if not isinstance(path, str):
+            continue
+        must = key in ("claude_code_sessions", "claude_desktop_sessions")
+        if not _inside(path) and (must or os.path.exists(os.path.expanduser(path))):
+            bad.append(f"{key}: {path}")
+if bad:
+    sys.exit("sandbox is not hermetic, corpus path outside it: " + "; ".join(bad))
 cfg["decay"]["go_live_date"] = "2026-08-01"
 cfg["matching"]["recurrence_min"] = 2
 cfg["extraction"]["batch_size"] = 1
@@ -72,6 +94,7 @@ cfg["extraction"]["batch_size"] = 1
 cfg["solving"]["enabled"] = True
 yaml.safe_dump(cfg, open(dst, "w"), sort_keys=False)
 PYEOF
+[[ $? -eq 0 && -f "$WORK/config.yaml" ]] || { echo "sandbox config not written (hermeticity check failed?)" >&2; exit 1; }
 
 # --- qmd isolation -------------------------------------------------------
 # The jobs run real `qmd update`/`qmd embed`/`qmd status` unless shadowed, and
@@ -329,7 +352,10 @@ contains "reopened loop's new occurrence was folded into its thread" \
          "- 2026-08-10 — " vault/loops/L0001.md
 
 step "Resurfacing via MCP round-trip"
-python3 - <<'PYEOF'
+# DREAMER_TODAY pins the queued file's date: it becomes L0002's last_seen,
+# which the later decay step reads. The wall clock here made the outcome
+# depend on the real date.
+DREAMER_TODAY="2026-08-11" python3 - <<'PYEOF'
 import sys, os
 sys.path.insert(0,'scripts')
 import dreamer_mcp as M
@@ -588,6 +614,10 @@ check "a second sweep is a no-op, not a second page" "1" "$CC_PAGES2"
 
 DIRTY=$(git status --porcelain | wc -l)
 check "ingest-cc left the tree clean (it commits its own work)" "0" "$DIRTY"
+# Hermeticity: no fixture plants desktop sessions, so none may appear. A hit
+# means the sandbox read the real ~/.config/Claude.
+DESKTOP_PAGES=$(grep -rl "source_agent: claude-desktop" vault/sources/transcripts 2>/dev/null | wc -l)
+check "sandbox ingested no real claude-desktop sessions" "0" "$DESKTOP_PAGES"
 
 step "Health gate: unhealthy index defers research honestly, then recovers"
 # The only research-eligible loop left is $MAL_ID (open, recurrence 2, no

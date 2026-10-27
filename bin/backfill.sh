@@ -55,11 +55,11 @@ data["batches"].append({
 atomic_write_json(path, data)
 print(f"quarantined {len(batch)} transcript(s) -> {path}")' || log "WARN could not write quarantine record"
     record_event "quarantine" "$COUNT transcript(s) in backfill batch $i produced unparseable extraction output and were skipped; see vault/.vault-meta/quarantine.json to re-run them"
-    "$PY" "$ROOT/scripts/make_batch.py" --limit "$COUNT" --mark-batch >/dev/null
+    printf '%s' "$BATCH_JSON" | "$PY" "$ROOT/scripts/make_batch.py" --mark-json || log "WARN could not mark the quarantined batch; it will be selected again"
     commit "backfill batch $i: quarantined (unparseable extraction)"
     continue
   fi
-  "$PY" "$ROOT/scripts/make_batch.py" --limit "$COUNT" --mark-batch >/dev/null
+  printf '%s' "$BATCH_JSON" | "$PY" "$ROOT/scripts/make_batch.py" --mark-json || die "could not mark batch $i extracted"
 
   regen_catalog
   # Per-batch commit: this boundary is what makes the calibration-gate rewind
