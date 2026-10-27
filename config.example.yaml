@@ -166,8 +166,30 @@ budget:
   cost_ceiling_per_run: null
 
 freshness:
-  # Warn in the digest when no new transcript has arrived in this long.
+  # Warn in the digest when no new transcript has arrived in this long; also
+  # the window for the claude.ai export source axis.
   stale_inbox_days: 10
+  # No Claude Code session ingested for this many days marks that source stale.
+  cc_sessions_quiet_days: 3
+  # Nightly jobs: one missed night goes stale.
+  job_max_age_hours: 28
+  # Weekly jobs (decay-archive).
+  weekly_job_max_age_days: 8
+  # A transcript waiting this many days for extraction is stale.
+  extract_lag_days: 2
+  # Same for goal assessment (only judged while a goal is active).
+  assess_lag_days: 2
+  # Last successful Postgres publish older than this reads stale (opt-in).
+  publish_max_age_hours: 3
+  # Postgres publisher: connect timeout, per-statement and lock-wait cap, and a
+  # hard cap on one whole publish (the process ends at the deadline).
+  publish_timeout_seconds: 5
+  publish_statement_timeout_seconds: 10
+  publish_deadline_seconds: 30
+  # v_status.laptop_reachable is false once no snapshot arrived for this long.
+  reachable_max_age_hours: 2
+  # Runs kept in heartbeats.json.
+  run_history_keep: 200
 
 # --- research -------------------------------------------------------------
 research:

@@ -38,6 +38,7 @@ import dreamer_common as C  # noqa: E402
 import goals as G  # noqa: E402
 import questions as Q  # noqa: E402
 import vault as V  # noqa: E402
+import freshness as FR  # noqa: E402
 
 try:
     from grade_conclusions import grade as _grade
@@ -220,6 +221,7 @@ def collect() -> dict:
     drift_loops = G.drift_detector(today)
     open_questions = Q.list_questions(status="unresolved", surface="all", ref=today)
 
+    fresh = FR.collect()
     return {
         "generated_at": _dt.datetime.now().isoformat(timespec="seconds"),
         "today": today.isoformat(),
@@ -292,6 +294,9 @@ def collect() -> dict:
             "stale_days": (today - newest).days if newest else None,
             "go_live": go_live.isoformat() if go_live else None,
             "decay_weeks": decay_weeks,
+            "overall": fresh["overall"],
+            "stale_count": fresh["stale_count"],
+            "axes": fresh["axes"],
         },
     }
 
@@ -331,15 +336,14 @@ def render(d: dict) -> str:
     # --- headline status cells -------------------------------------------
     cells = []
 
-    stale = F["stale_days"]
-    if stale is None:
-        cells.append(("Transcript inbox", "warn", "no transcripts found",
-                      "Nothing on disk under sources/transcripts."))
+    if F["overall"] == "ok":
+        cells.append(("Freshness", "good", "all axes current",
+                      f"{len(F['axes'])} axes checked. Newest transcript: "
+                      f"{F['newest_transcript'] or 'none'}."))
     else:
-        kind = "good" if stale <= 3 else ("warn" if stale <= 10 else "crit")
-        cells.append(("Newest transcript", kind,
-                      "today" if stale == 0 else f"{stale}d ago",
-                      f"Latest conversation ingested: {F['newest_transcript']}."))
+        cells.append(("Freshness", "crit", f"{F['stale_count']} stale",
+                      "One or more axes are past their window — see the "
+                      "Freshness table below."))
 
     if F["go_live"]:
         cells.append(("Decay clock", "good", f"live since {F['go_live']}",
@@ -466,6 +470,14 @@ def render(d: dict) -> str:
         f'<tr><td>{_e(name.replace("_", " "))}</td><td class="num-cell">{n}</td></tr>'
         for name, n in CN["fails"]
     ) or '<tr><td colspan="2" class="empty">No rubric failures.</td></tr>'
+
+    fresh_pill = {"ok": "good", "stale": "crit", "never": "crit", "info": "warn"}
+    fresh_rows = "".join(
+        f'<tr><td>{_e(a["label"])}</td>'
+        f'<td>{_pill(fresh_pill.get(a["status"], "warn"), a["status"])}</td>'
+        f'<td>{_e(a["last_ran"] or a["last_arrival"] or a["last_produced"] or "—")}</td>'
+        f'<td>{_e(a["reason"])}</td></tr>'
+        for a in F["axes"])
 
     # --- runs -------------------------------------------------------------
     job_rows = "".join(
@@ -720,6 +732,19 @@ footer code{{font-family:var(--mono);background:var(--accent-soft);color:var(--a
     </table>
   </div>
 </section>
+
+<section>
+  <h2>Freshness</h2>
+  <p class="section-note">When each part of the system last fired. An axis is stale when a
+    job missed its schedule, a source went quiet, or input arrived and was not processed.</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Axis</th><th>Status</th><th>Last</th><th>Reason</th></tr></thead>
+      <tbody>{fresh_rows}</tbody>
+    </table>
+  </div>
+</section>
+
 
 <section>
   <h2>Job history</h2>

@@ -17,6 +17,7 @@
 # decision-only pages; rule 2 binds every night thereafter.
 JOB=tag-backfill
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+arm_heartbeat
 acquire_lock
 
 log "start"

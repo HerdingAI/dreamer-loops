@@ -18,6 +18,7 @@
 # Manual run: ./bin/night-cycle.sh [backfill-batches]
 JOB=night-cycle
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+arm_heartbeat
 
 BATCHES="${1:-${BACKFILL_BATCHES:-8}}"
 

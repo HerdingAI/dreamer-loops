@@ -2,6 +2,7 @@
 # Job 1 — nightly-extract (§6.9). Nightly 02:00.
 JOB=nightly-extract
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+arm_heartbeat
 
 # Health check BEFORE acquire_lock: healthcheck takes the same wiki.lock for
 # its run-state write, and flock is per open-file-description, so a child

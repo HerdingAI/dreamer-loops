@@ -14,6 +14,7 @@
 # CC_LIMIT overrides cc_ingest.max_sessions_per_run for one run.
 JOB=ingest-cc
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+arm_heartbeat
 
 log "start"
 

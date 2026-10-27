@@ -17,6 +17,7 @@ JOB=ingest
 # _common.sh only defines helpers; the lock is a function we deliberately
 # do not call (see contract above).
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+arm_heartbeat
 
 INBOX="$ROOT/to_ingest"
 DONE="$INBOX/processed"
