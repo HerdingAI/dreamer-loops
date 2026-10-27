@@ -68,6 +68,8 @@ cfg.setdefault("corpora", {})["claude_code_sessions"] = f"{root}-cc-projects"
 cfg["decay"]["go_live_date"] = "2026-08-01"
 cfg["matching"]["recurrence_min"] = 2
 cfg["extraction"]["batch_size"] = 1
+# The sandbox runs with the solution spine on.
+cfg["solving"]["enabled"] = True
 yaml.safe_dump(cfg, open(dst, "w"), sort_keys=False)
 PYEOF
 
@@ -926,6 +928,34 @@ G_BEFORE=$(cd "$WORK" && sha256sum vault/goals/G0001.md | cut -d' ' -f1)
 (cd "$WORK" && python3 scripts/freshness_publish.py >/dev/null)
 G_AFTER=$(cd "$WORK" && sha256sum vault/goals/G0001.md | cut -d' ' -f1)
 check "computing and publishing freshness leaves the goal page byte-identical" "$G_BEFORE" "$G_AFTER"
+
+step "Solution spine: a researched loop is worked through its stages"
+
+cd "$WORK"
+SPINE_PAGE=$(grep -l "^problem_type: design" vault/conclusions/*.md | head -1)
+[[ -n "$SPINE_PAGE" ]] && ok "the researched loop's conclusion carries its problem type" \
+  || bad "no conclusion with problem_type: design"
+SPINE_HEADS=$(grep -E "^## (Define|Diagnose|Options|Evaluate|Synthesis|Check)$" "$SPINE_PAGE" | tr '\n' ' ')
+check "the page has the design stages in spine order" \
+  "## Define ## Diagnose ## Options ## Evaluate ## Synthesis ## Check " "$SPINE_HEADS"
+check "the owner's criterion survived" "1" \
+  "$(grep -c "^- \*\*Settles the file-or-DB question\*\*" "$SPINE_PAGE")"
+check "the criterion quoted from an Assistant turn was dropped" "0" \
+  "$(grep -c "Invented by the model" "$SPINE_PAGE")"
+check "the research prompt asked for the spine" "1" \
+  "$(grep -c "^## Step 1b" logs/.prompt-dream-L0001.md)"
+# By the end of the simulated week L0001 has decayed into the archive; the
+# type must have travelled with the page.
+check "the loop page records the type" "1" \
+  "$(cat vault/loops/L0001.md vault/archive/L0001.md 2>/dev/null | grep -c "^problem_type: design")"
+SPINE_BOARD=$(python3 -c "
+import sys; sys.path.insert(0, 'scripts')
+from pathlib import Path
+import board_publish as BP, dreamer_common as dc
+fm, body = dc.read_page(Path('$SPINE_PAGE'))
+s = BP.page_sections(body)
+print(s is not None and bool(s.get('Synthesis')))")
+check "the board publisher still accepts the page" "True" "$SPINE_BOARD"
 
 printf '\n\033[1m== Result ==\033[0m\n'
 printf '  passed: %s\n  failed: %s\n  sandbox: %s\n' "$PASS" "$FAIL" "$WORK"

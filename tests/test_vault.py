@@ -9,6 +9,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -21,7 +22,30 @@ D = _dt.date.fromisoformat
 
 
 class VaultCase(unittest.TestCase):
+    def _no_live_calls(self) -> None:
+        """merge_proposals.refresh() defaults to the real judge (`claude -p`)
+        and real embedding neighbours (`qmd vsearch` on the live index). Left
+        alone, these unit tests spend model calls on every run and pass or
+        fail on what a live model happens to answer.
+        The judge is replaced by the deterministic rule it falls back to
+        (token overlap against THRESHOLD), and the neighbour search by nothing.
+        The live judge has its own tests in test_merge_proposals.py."""
+        import golden_set
+        import merge_proposals as MP
+
+        def judge(a: str, b: str) -> dict:
+            same = MP.similarity(a, b) >= MP.THRESHOLD
+            return {"verdict": "same" if same else "distinct", "confidence": "high",
+                    "reason": "test judge: token overlap"}
+
+        for target, attr, value in ((golden_set, "judge_llm", judge),
+                                    (MP, "_semantic_neighbours", lambda loops, limit=4: set())):
+            patcher = mock.patch.object(target, attr, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def setUp(self) -> None:
+        self._no_live_calls()
         self.tmp = Path(tempfile.mkdtemp(prefix="dreamer-vault-"))
         for name in ("loops", "conclusions", "concepts", "archive", "digests",
                      "sources", "meta", "vault"):

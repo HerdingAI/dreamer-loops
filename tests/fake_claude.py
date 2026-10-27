@@ -102,6 +102,14 @@ def dream_reply(prompt: str) -> dict:
         "fetched_urls": spec.get("fetched_urls", []),
         "proposed_tags": spec.get("proposed_tags", []),
     }
+    # The solution spine (rule 5b): a scripted loop may carry spine fields,
+    # which the applier must validate exactly as it would a real reply.
+    if spec.get("problem_type"):
+        reply["problem_type"] = spec["problem_type"]
+        for key in ("define", "diagnosis", "assumptions", "options", "evaluation",
+                    "recommended_option", "success_signal"):
+            if key in spec:
+                reply["sections"][key] = spec[key]
     # Thread rebuild (rules 13/15): when the prompt carries the derived
     # thread block, a researching dream may return a rebuilt Now citing only
     # this loop's occurrences — modelled here so apply_conclusion's

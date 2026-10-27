@@ -271,3 +271,9 @@ pins:
   # skills/autoresearch is vendored from this commit. See its ATTRIBUTION.md.
   claude_obsidian_commit: "1c1bc49c03a685ee8f5d09c99efe52b42d6673f5"
   claude_obsidian_scope: "skills/autoresearch only (vendored, MIT)"
+
+# --- solution spine -------------------------------------------------------
+solving:
+  # false turns the spine off: no spine request in the research prompt, previous page layout.
+  enabled: true
+  min_options: 2        # options required besides "Leave it"

@@ -36,6 +36,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from dreamer_common import p, read_page  # noqa: E402
+import spine as SP  # noqa: E402
 
 # Hedges that signal a conclusion declining to conclude. Counted only in the
 # synthesis: hedging inside a graded claim is honest, hedging in the answer is
@@ -141,6 +142,27 @@ def grade(path: Path) -> dict:
         r"loops/)", quarantine, re.M)
     checks["no_derived_citations_as_evidence"] = (
         len(derived_cites) == len(quarantined_cites))
+
+    # 6. The solution spine (rule 5b) — only on pages that carry a problem
+    #    type, so the historical series for legacy pages stays comparable.
+    ptype = str(fm.get("problem_type") or "")
+    if ptype in SP.TYPES:
+        def has(stage: str) -> bool:
+            return bool(re.search(rf"^## {re.escape(SP.HEADINGS[stage])}\s*$", body, re.M))
+
+        checks["spine_stages_complete"] = all(
+            has(st) and SP.MISSING not in _section(body, SP.HEADINGS[st])
+            for st in SP.required(ptype))
+        evaluate = _section(body, "Evaluate")
+        if SP.DEPTH[ptype]["evaluate"] == "full":
+            checks["criteria_owner_cited"] = bool(
+                re.search(r"— source: `\[\[sources/transcripts/", evaluate))
+            checks["premortem_present"] = "**Premortem.**" in evaluate
+        if ptype in SP.NEEDS_CRITERIA:
+            names = re.findall(r"^- \*\*(.+?)\*\*", _section(body, "Options"), re.M)
+            chosen = re.search(r"^\*\*Recommended:\*\* (.+)$", evaluate, re.M)
+            checks["recommendation_names_option"] = bool(
+                chosen and chosen.group(1).strip() in names)
 
     score = sum(checks.values()) / len(checks)
     return {
