@@ -36,6 +36,9 @@ corpora:
   # <project>/<session-id>.jsonl. Files nested deeper than that are spawned
   # subagent transcripts and are excluded by shape — see cc_ingest below.
   claude_code_sessions: ~/.claude/projects
+  # Claude desktop app local-agent sessions (scripts/convert_desktop_sessions.py,
+  # same ingest-cc cron line). One transcript per <account>/<org>/local_<id>/audit.jsonl.
+  claude_desktop_sessions: ~/.config/Claude/local-agent-mode-sessions
   # Directories of books, papers, lecture transcripts — your reference
   # library. Any mix of .txt / .md / .pdf / .epub; see bin/verify.sh.
   wisdom_sources:
@@ -136,6 +139,15 @@ cc_ingest:
   # Dreamer's own automation.
   exclude_projects:     []
 
+# Claude desktop app session ingestion. The triage floors and the quiet
+# window are inherited from cc_ingest above; set one here to diverge.
+desktop_ingest:
+  # Own ledger, so the claude-code arrival axis keeps meaning Claude Code.
+  ledger:               desktop-ingested.json
+  # Shown as `project:` on the page; the app has no project dimension.
+  project_label:        desktop
+  max_sessions_per_run: 10
+
 # --- budget ---------------------------------------------------------------
 budget:
   max_turns_nightly:  60
@@ -171,6 +183,10 @@ freshness:
   stale_inbox_days: 10
   # No Claude Code session ingested for this many days marks that source stale.
   cc_sessions_quiet_days: 3
+  # source.claude-ai: how old the last ok daily sync may be (one missed day plus slack).
+  claude_ai_sync_max_age_hours: 36
+  # source.claude-ai goes stale this many days before the claude.ai login expires.
+  claude_ai_login_warn_days: 3
   # Nightly jobs: one missed night goes stale.
   job_max_age_hours: 28
   # Weekly jobs (decay-archive).
@@ -277,3 +293,25 @@ solving:
   # false turns the spine off: no spine request in the research prompt, previous page layout.
   enabled: true
   min_options: 2        # options required besides "Leave it"
+
+# --- claude.ai daily sync -------------------------------------------------
+# Daily claude.ai -> Dreamer sync (docs/claude-ai-sync.md). Read by the native
+# host (scripts/claude_ai_host.py), the Chrome extension (through the host's
+# status reply), bin/claude-ai-host, bin/sync-claude-ai.sh and
+# bin/install-sync-extension.sh. Empty extension_id means the sync is not set
+# up: its freshness axes read info/disabled.
+claude_ai_sync:
+  python: /usr/bin/python3        # bin/claude-ai-host: Chrome starts the host with no shell environment
+  host_name: com.dreamer.claude_ai_sync
+  extension_id: ""                # the ID Chrome shows for the unpacked extension on chrome://extensions
+  due_hours: 20                   # a run is due when last_ok is older than this
+  retry_after_failure_hours: 3    # after a failed attempt, wait this long before the hourly tick retries
+  quiet_hours: 6                  # skip chats updated more recently; a later run takes them
+  max_per_run: 40                 # chats fetched per run; the rest wait (state "pending")
+  spacing_seconds: 3              # minimum gap between chat requests
+  page_size: 50                   # list page size
+  max_pages: 200                  # safety bound on list paging
+  max_retries: 4                  # for 429 and 5xx, per request
+  backoff_base_seconds: 5
+  backoff_max_seconds: 120
+  lock_wait_seconds: 2700         # bin/sync-claude-ai.sh waits this long for wiki.lock (an extraction in progress)

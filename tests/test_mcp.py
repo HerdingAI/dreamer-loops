@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -239,6 +241,18 @@ class SandboxedToolTest(unittest.TestCase):
         self.assertIn("loop_id: L0001", text)
         self.assertIn("untrusted", text, "note must be marked untrusted")
         self.assertIn("> new angle: cost model", text, "note must be quoted")
+
+    def test_log_resurfacing_is_stamped_with_the_pinned_day(self) -> None:
+        # The queued file's date becomes the loop's occurrence/last_seen. It
+        # must follow DREAMER_TODAY, not the wall clock, or a pinned-date run
+        # (the simulated week) disagrees with the file it just queued.
+        V.create_loop("X", self._transcript("2026-07-01", "a"), D("2026-07-01"))
+        with mock.patch.dict(os.environ, {"DREAMER_TODAY": "2026-08-11"}):
+            res = json.loads(M.tool_log_resurfacing("L0001", "angle"))
+        self.assertTrue(res["ok"])
+        self.assertTrue(res["queued"].startswith("2026-08-11--L0001--"), res["queued"])
+        text = next((self.tmp / "resurfacings").glob("*.md")).read_text(encoding="utf-8")
+        self.assertIn("date: 2026-08-11", text)
 
     def test_log_resurfacing_rejects_traversal_and_oversize(self) -> None:
         V.create_loop("X", self._transcript("2026-07-01", "a"), D("2026-07-01"))

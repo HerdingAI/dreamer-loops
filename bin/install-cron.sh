@@ -23,6 +23,12 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${NODE_BIN:+:$N
 # the vault lock; co-scheduled, the second would always lose and skip.
 0 20,23,2,5 * * * flock -n /tmp/dreamer-night.lock $ROOT/bin/night-cycle.sh >> $ROOT/logs/night.log 2>&1
 
+# claude.ai sync conversion: the Dreamer Sync Chrome extension leaves drops in
+# to_ingest/; this converts them before the 19:00 extraction. It WAITS for the
+# vault lock (claude_ai_sync.lock_wait_seconds) so it never rewrites a page
+# under a running extraction. Fetching itself is the extension's job.
+0 18 * * * flock -n /tmp/dreamer-sync-claude-ai.lock $ROOT/bin/sync-claude-ai.sh >> $ROOT/logs/sync-claude-ai.log 2>&1
+
 # Claude Code session ingestion, ahead of extraction so anything it writes is
 # in the queue the 19:00 run selects from. Takes no vault lock (append-only
 # into vault/sources via atomic writes), but is scheduled clear of the others

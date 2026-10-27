@@ -50,6 +50,13 @@ AXES = [
     {"axis": "source.claude-export", "kind": "source", "label": "claude.ai export",
      "rule": "source", "ledger": "claude-export",
      "limit": ("freshness", "stale_inbox_days", HOURS_PER_DAY)},
+    # The daily claude.ai sync, judged from the state file the job writes
+    # (docs/claude-ai-sync-state.md), not from the ledger: a failed latest
+    # attempt must never read as ok however recent the last success was.
+    {"axis": "source.claude-ai", "kind": "source", "label": "claude.ai daily sync",
+     "rule": "claude-ai-sync",
+     "limit": ("freshness", "claude_ai_sync_max_age_hours", 1.0),
+     "enabled_by": ("claude_ai_sync", "extension_id"), "off_reason": "disabled"},
     {"axis": "source.cc-sessions", "kind": "source", "label": "Claude Code sessions",
      "rule": "source", "ledger": "cc-sessions",
      "limit": ("freshness", "cc_sessions_quiet_days", HOURS_PER_DAY)},
@@ -57,6 +64,9 @@ AXES = [
      "rule": "owner-writes"},
     {"axis": "job.ingest-cc", "kind": "job", "label": "Claude Code ingest",
      "rule": "job", "job": "ingest-cc", "limit": ("freshness", "job_max_age_hours", 1.0)},
+    {"axis": "job.sync-claude-ai", "kind": "job", "label": "claude.ai daily sync",
+     "rule": "job", "job": "sync-claude-ai", "limit": ("freshness", "job_max_age_hours", 1.0),
+     "enabled_by": ("claude_ai_sync", "extension_id"), "off_reason": "disabled"},
     {"axis": "job.nightly-extract", "kind": "job", "label": "Nightly extraction",
      "rule": "job", "job": "nightly-extract", "limit": ("freshness", "job_max_age_hours", 1.0)},
     {"axis": "job.nightly-assess", "kind": "job", "label": "Nightly goal assessment",
@@ -118,6 +128,16 @@ def _iso(dt: _dt.datetime | None) -> str | None:
     return dt.isoformat(timespec="seconds") if dt else None
 
 
+def _utc_label(ts) -> str | None:
+    """A UTC stamp for display, as UTC with Z. _parse turns it into naive
+    local time, which is right for age arithmetic but reads hours off when
+    shown without a zone."""
+    dt = _parse(ts)
+    if dt is None:
+        return None
+    return dt.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _age_h(now: _dt.datetime, dt: _dt.datetime | None) -> float | None:
     if dt is None:
         return None
@@ -144,6 +164,17 @@ def _axis(spec: dict, **fields) -> dict:
            "backlog": None, "reason": ""}
     out.update(fields)
     return out
+
+
+def _enabled(spec: dict) -> bool:
+    """False when the spec names an opt-in config key (`enabled_by`) that is
+    unset or empty: the feature is not set up, so its axis reports `info` with
+    the spec's off_reason instead of being judged stale."""
+    gate = spec.get("enabled_by")
+    if not gate:
+        return True
+    block = CFG.get(gate[0])
+    return bool(isinstance(block, dict) and block.get(gate[1]))
 
 
 def _newest(stamps) -> _dt.datetime | None:
@@ -207,6 +238,82 @@ def _rule_source(spec, hb, state, now):
     status, reason = _judge(_age_h(now, arrival), limit, "last arrival")
     return _axis(spec, status=status, reason=reason, last_arrival=_iso(arrival),
                  threshold_hours=limit)
+
+
+# Fixed phrases keyed by the sync job's `status`. The job's free-text `detail`
+# is never published (it may carry a path or a page snippet); a viewer gets
+# the action to take, from this table only.
+CLAUDE_AI_SYNC_FILE = "claude-ai-sync.json"
+CLAUDE_AI_PROBLEMS = {
+    "needs_login": "needs re-login",
+    "blocked": "blocked by claude.ai",
+    "schema_changed": "claude.ai response format changed",
+    "error": "last attempt errored",
+}
+
+
+def _rule_claude_ai_sync(spec, hb, state, now):
+    limit = _limit_h(spec)
+    f = p("meta") / CLAUDE_AI_SYNC_FILE
+    if not f.exists():
+        return _axis(spec, status="never", reason="no sync state recorded",
+                     threshold_hours=limit)
+    # read_json swallows a corrupt file into None; that must read as a
+    # failure here, not as "missing" and not as ok.
+    st = read_json(f, default=None)
+    if not isinstance(st, dict):
+        return _axis(spec, status="stale", reason="sync state file unreadable",
+                     threshold_hours=limit)
+    attempt, last_ok = _parse(st.get("last_attempt")), _parse(st.get("last_ok"))
+    cursor = _parse(st.get("cursor"))
+    fetched = st.get("fetched")
+    extra = []
+    if cursor:
+        extra.append(f"cursor {_utc_label(st.get('cursor'))}")
+    if isinstance(fetched, int) and not isinstance(fetched, bool):
+        extra.append(f"fetched {fetched} last run")
+    tail = ("; " + "; ".join(extra)) if extra else ""
+    common = dict(last_ran=_iso(attempt), last_arrival=_iso(cursor),
+                  last_outcome=None, threshold_hours=limit)
+    login_problem, login_note = _claude_ai_login(st, now)
+    if login_note:
+        tail += f"; {login_note}"
+    status = st.get("status")
+    if status != "ok":
+        problem = CLAUDE_AI_PROBLEMS.get(status, "unrecognised sync status")
+        _, ok_reason = _judge(_age_h(now, last_ok), limit, "last ok sync")
+        return _axis(spec, **{**common, "status": "stale", "last_outcome": "failed",
+                              "reason": f"{problem}; {ok_reason}{tail}"})
+    verdict, reason = _judge(_age_h(now, last_ok), limit, "last ok sync")
+    if login_problem:
+        # The last run was fine, but the login it ran on is about to lapse
+        # (or already has): warn now, while re-logging in costs nothing.
+        verdict, reason = "stale", f"{login_problem}; {reason}"
+    return _axis(spec, **{**common, "status": verdict, "last_outcome": "ok" if last_ok else None,
+                          "reason": reason + tail})
+
+
+def _claude_ai_login(st: dict, now) -> tuple[str | None, str | None]:
+    """(problem, note) from the login expiry the extension reports each hour.
+
+    The key absent means an extension too old to report it: judge nothing.
+    Present but null means Chrome holds no claude.ai login at all.
+    """
+    if "login_expires_at" not in st:
+        return None, None
+    raw = st.get("login_expires_at")
+    exp = _parse(raw)
+    if exp is None:
+        return ("no claude.ai login in Chrome; log in and click Dreamer Sync"
+                if raw is None else "login expiry unreadable"), None
+    days = (exp - now).total_seconds() / 86400.0
+    label = f"login until {exp.astimezone(_dt.timezone.utc).date().isoformat()}"
+    if days <= 0:
+        return "claude.ai login expired; log in and click Dreamer Sync", label
+    if days <= float(cfg("freshness", "claude_ai_login_warn_days")):
+        return (f"claude.ai login expires in {days:.1f} days; "
+                "log out and back in on claude.ai, then click Dreamer Sync"), label
+    return None, label
 
 
 def _rule_owner_writes(spec, hb, state, now):
@@ -282,7 +389,7 @@ def _rule_publish(spec, hb, state, now):
 
 
 RULES = {"job": _rule_job, "healthcheck": _rule_healthcheck, "source": _rule_source,
-         "owner-writes": _rule_owner_writes, "extraction": _rule_extraction,
+         "owner-writes": _rule_owner_writes, "claude-ai-sync": _rule_claude_ai_sync, "extraction": _rule_extraction,
          "assessment": _rule_assessment, "folds": _rule_folds,
          "search-index": _rule_search_index, "output": _rule_output,
          "publish": _rule_publish}
@@ -298,6 +405,9 @@ def collect(now: _dt.datetime | None = None) -> dict:
         state = {}
     axes = []
     for spec in AXES:
+        if not _enabled(spec):
+            axes.append(_axis(spec, reason=spec.get("off_reason", "not configured")))
+            continue
         try:
             axes.append(RULES[spec["rule"]](spec, hb, state, now))
         except SystemExit:

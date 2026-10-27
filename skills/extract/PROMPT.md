@@ -50,6 +50,20 @@ circling a topic and must not create or match a loop by itself; the owner
 engaging with, disputing, or extending it *in their own words* is a legitimate
 occurrence.
 
+### Continuation transcripts (chats that grew)
+
+A chat that grew after it was extracted comes back with a `CONTINUATION` line
+under its path below, and a divider inside the file:
+`> **[NEW TURNS START HERE — from message N. Everything above was already extracted.]**`.
+For these, extract **only from the turns after that divider**. Earlier turns are
+context: they explain what the new turns refer to, and they were already
+extracted, so do not emit a candidate for a thread that lives only above the
+divider, and anchor every `evidence` quote to a Human turn after it. The
+divider is not a turn and not owner speech; never quote it. If the new turns
+continue a loop that earlier turns already raised, match it to that loop as
+usual: the transcript is already one of its occurrences, so this adds nothing
+and recurrence does not rise (recurrence counts distinct conversations).
+
 ## Output contract
 
 Return **only** a single JSON object on stdout. No prose, no markdown fences,
