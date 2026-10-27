@@ -60,11 +60,16 @@ _heartbeat_exit() {
       --started "$_HB_STARTED" --outcome "$outcome" --meta "$META" \
       ${flag[@]+"${flag[@]}"} \
     || log "WARN heartbeat not recorded (see stderr above)"
-  # Publish the snapshot this run just changed. Always exits 0 and is `|| true`
-  # besides: a display being unreachable is never a reason for a job to fail.
-  # `9>&-` closes the vault lock in the child, so a publisher that outlives
-  # this shell can never hold wiki.lock; the publisher also bounds itself
-  # with a hard deadline (freshness.publish_deadline_seconds).
+  # Publish what this run just changed. Both publishers always exit 0 and are
+  # `|| true` besides: a display being unreachable is never a reason for a job
+  # to fail. `9>&-` closes the vault lock in the child, so a publisher that
+  # outlives this shell can never hold wiki.lock; each also bounds itself with
+  # a hard deadline (board.publish_deadline_seconds,
+  # freshness.publish_deadline_seconds).
+  # The board (content, opt-in) goes first so the health snapshot published
+  # next already carries the current publish.board verdict.
+  "$PY" "$ROOT/scripts/board_publish.py" --meta "$META" \
+      >> "$LOGS/board-publish.log" 2>&1 9>&- || true
   "$PY" "$ROOT/scripts/freshness_publish.py" --meta "$META" \
       >> "$LOGS/freshness-publish.log" 2>&1 9>&- || true
   exit "$rc"

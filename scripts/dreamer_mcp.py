@@ -50,6 +50,7 @@ from dreamer_common import (  # noqa: E402
 )
 import goals as G  # noqa: E402
 import questions as Q  # noqa: E402
+import publish_trigger as PT  # noqa: E402
 import vault as V  # noqa: E402
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -658,6 +659,7 @@ def tool_set_status(
                 params={"id": id, "status": status},
                 confirmation=conf,
             )
+            PT.fire()
             return json.dumps({"ok": True, "id": updated.id, "status": status, "confirmation": conf}, indent=2)
         elif target_id.startswith("L"):
             loop = V.load_loop(target_id, include_archived=True)
@@ -677,6 +679,8 @@ def tool_set_status(
                 params={"id": id, "status": status},
                 confirmation=conf,
             )
+            # A resolved loop leaves the board; publish now, not at the next hour.
+            PT.fire()
             return json.dumps({"ok": True, "id": updated_loop.id, "status": status, "confirmation": conf}, indent=2)
         else:
             return json.dumps({"error": f"unrecognized identifier {target_id!r} (expected Gxxxx or Lxxxx)"})
@@ -1366,6 +1370,9 @@ def err(mid, code, message) -> dict:
 
 
 def main() -> int:
+    # Only the running server publishes after an owner write; importing this
+    # module (tests, scripts) leaves the trigger off.
+    PT.ENABLED = True
     for line in sys.stdin:
         line = line.strip()
         if not line:

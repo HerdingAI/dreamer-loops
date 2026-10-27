@@ -88,6 +88,12 @@ AXES = [
     {"axis": "publish.postgres", "kind": "publish", "label": "Postgres publish",
      "rule": "publish", "limit": ("freshness", "publish_max_age_hours", 1.0),
      "off_reason": "disabled"},
+    # The opt-in content publisher. Its heartbeat record is separate from the
+    # health publisher's; unset means the owner has not enabled it, which is a
+    # legitimate state, not a failure.
+    {"axis": "publish.board", "kind": "publish", "label": "Board publish",
+     "rule": "publish", "record": "publish_board", "off_reason": "disabled",
+     "limit": ("freshness", "publish_max_age_hours", 1.0)},
 ]
 
 
@@ -264,7 +270,7 @@ def _rule_output(spec, hb, state, now):
 
 
 def _rule_publish(spec, hb, state, now):
-    pub = hb.get("publish") or {}
+    pub = hb.get(spec.get("record", "publish")) or {}
     if not pub.get("configured"):
         return _axis(spec, reason=spec.get("off_reason", "not configured"))
     limit = _limit_h(spec)

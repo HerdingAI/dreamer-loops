@@ -113,7 +113,11 @@ class EnvTest(PublishCase):
     def test_connection_uses_separate_keywords_never_a_dsn(self) -> None:
         self.configure(password="p@ss#w0rd")
         kw = P.conn_kwargs(P.load_env(P.env_path()))
-        self.assertEqual(set(kw), {"host", "port", "dbname", "user", "password", "connect_timeout", "options"})
+        self.assertEqual(set(kw), {"host", "port", "dbname", "user", "password", "connect_timeout",
+                                   "options", "client_encoding"})
+        # Never the server's default: on a SQL_ASCII database psycopg would
+        # encode queries as ASCII and fail on the first non-ASCII character.
+        self.assertEqual(kw["client_encoding"], "UTF8")
         self.assertEqual((kw["host"], kw["port"], kw["dbname"], kw["user"]),
                          ("db.example.invalid", 5432, "dreamer", "dreamer_user"))
         self.assertEqual(kw["connect_timeout"], int(F.cfg("freshness", "publish_timeout_seconds")))
@@ -231,7 +235,10 @@ class EnsureDatabaseTest(PublishCase):
         self.assertEqual(P.ensure_database(connect=connect), "created")
         self.assertEqual(seen["dbname"], "postgres")
         self.assertTrue(conn.autocommit)
-        self.assertEqual(len(conn.sql('CREATE DATABASE "dreamer"')), 1)
+        # Explicit encoding from template0: a bare CREATE DATABASE inherits
+        # template1's, which on some servers is SQL_ASCII.
+        self.assertEqual(
+            len(conn.sql("""CREATE DATABASE "dreamer" ENCODING 'UTF8' TEMPLATE template0""")), 1)
 
     def test_leaves_an_existing_database_alone(self) -> None:
         self.configure()

@@ -116,7 +116,7 @@ class ShapeTest(FreshCase):
                 "job.night-cycle", "job.weekly-dream", "job.decay-archive", "job.healthcheck",
                 "converge.extraction", "converge.assessment", "converge.folds",
                 "converge.search-index", "output.conclusion", "output.digest",
-                "publish.postgres"}
+                "publish.postgres", "publish.board"}
         self.assertEqual({a["axis"] for a in snap["axes"]}, want)
         keys = {"axis", "kind", "label", "status", "last_ran", "last_produced",
                 "last_arrival", "last_outcome", "threshold_hours", "backlog", "reason"}
@@ -276,6 +276,38 @@ class PublishAxisTest(FreshCase):
     def test_configured_and_old_is_stale(self) -> None:
         self.set_publish({"configured": True, "last_ok": ago(5)})
         self.assertEqual(self.axis("publish.postgres")["status"], "stale")
+
+
+class BoardPublishAxisTest(FreshCase):
+    def set_board(self, pub: dict) -> None:
+        data = json.loads((self.meta / "heartbeats.json").read_text(encoding="utf-8"))
+        data["publish_board"] = pub
+        self.write("heartbeats.json", data)
+
+    def test_absent_record_is_info_disabled(self) -> None:
+        a = self.axis("publish.board")
+        self.assertEqual((a["status"], a["reason"]), ("info", "disabled"))
+
+    def test_unconfigured_is_info_disabled(self) -> None:
+        self.set_board({"configured": False})
+        a = self.axis("publish.board")
+        self.assertEqual((a["status"], a["reason"]), ("info", "disabled"))
+
+    def test_recent_success_is_ok(self) -> None:
+        self.set_board({"configured": True, "last_ok": ago(1)})
+        self.assertEqual(self.axis("publish.board")["status"], "ok")
+
+    def test_old_success_is_stale(self) -> None:
+        self.set_board({"configured": True, "last_ok": ago(5)})
+        self.assertEqual(self.axis("publish.board")["status"], "stale")
+
+    def test_the_postgres_axis_ignores_the_board_record(self) -> None:
+        self.set_board({"configured": True, "last_ok": ago(1)})
+        a = self.axis("publish.postgres")
+        self.assertEqual((a["status"], a["reason"]), ("info", "disabled"))
+
+    def test_a_disabled_board_does_not_make_the_vault_stale(self) -> None:
+        self.assertEqual(F.collect(NOW)["overall"], "ok")
 
 
 import healthcheck as H  # noqa: E402

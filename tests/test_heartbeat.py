@@ -79,9 +79,11 @@ class RecordTest(HeartbeatCase):
 
     def test_garbled_file_loads_empty(self) -> None:
         (self.meta / "heartbeats.json").write_text("{not json", encoding="utf-8")
-        self.assertEqual(HB.load(self.meta), {"jobs": {}, "runs": [], "publish": {}})
+        self.assertEqual(HB.load(self.meta),
+                         {"jobs": {}, "runs": [], "publish": {}, "publish_board": {}})
         (self.meta / "heartbeats.json").write_text("[1, 2]", encoding="utf-8")
-        self.assertEqual(HB.load(self.meta), {"jobs": {}, "runs": [], "publish": {}})
+        self.assertEqual(HB.load(self.meta),
+                         {"jobs": {}, "runs": [], "publish": {}, "publish_board": {}})
 
     def test_concurrent_records_lose_nothing(self) -> None:
         procs = [subprocess.Popen(
@@ -107,6 +109,30 @@ class PublishRecordTest(HeartbeatCase):
         self.assertEqual(pub["last_ok"], "2026-10-03T12:12:00")
         self.assertEqual(pub["last_error"], "OperationalError")
         self.assertEqual(pub["last_error_at"], "2026-10-03T13:12:00")
+
+    def test_targets_are_independent(self) -> None:
+        HB.record_publish(True, True, at="2026-10-03T12:12:00", meta=self.meta)
+        HB.record_publish(True, False, error="OperationalError",
+                          at="2026-10-03T12:13:00", meta=self.meta, target="publish_board")
+        data = HB.load(self.meta)
+        self.assertEqual(data["publish"], {"configured": True, "last_ok": "2026-10-03T12:12:00"})
+        self.assertEqual(data["publish_board"],
+                         {"configured": True, "last_error": "OperationalError",
+                          "last_error_at": "2026-10-03T12:13:00"})
+        HB.record_publish(True, True, at="2026-10-03T13:12:00", meta=self.meta,
+                          target="publish_board")
+        data = HB.load(self.meta)
+        self.assertEqual(data["publish"]["last_ok"], "2026-10-03T12:12:00")
+        self.assertEqual(data["publish_board"],
+                         {"configured": True, "last_ok": "2026-10-03T13:12:00"})
+
+    def test_a_missing_board_record_loads_as_empty(self) -> None:
+        HB.record_publish(True, True, at="2026-10-03T12:12:00", meta=self.meta)
+        self.assertEqual(HB.load(self.meta)["publish_board"], {})
+
+    def test_an_unknown_target_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            HB.record_publish(True, True, meta=self.meta, target="publish_other")
 
     def test_unchanged_state_is_not_rewritten(self) -> None:
         HB.record_publish(False, False, meta=self.meta)
@@ -207,6 +233,34 @@ class WiringTest(HeartbeatCase):
         text = (ROOT / "bin" / "freshness-setup.sh").read_text(encoding="utf-8")
         self.assertLess(text.index("--create-database"), text.index("--show"))
 
+    def test_the_trap_runs_the_board_publisher_before_the_health_publisher(self) -> None:
+        text = (ROOT / "bin" / "_common.sh").read_text(encoding="utf-8")
+        self.assertLess(text.index("scripts/board_publish.py"),
+                        text.index("scripts/freshness_publish.py"))
+        cmd = (f'JOB=testjob; source "{ROOT}/bin/_common.sh"; META="{self.meta}"; '
+               f'LOGS="{self.meta}"; arm_heartbeat; exit 4')
+        env = dict(os.environ, DREAMER_PG_ENV="/nonexistent/postgres.env")
+        rc = subprocess.run(["bash", "-c", cmd], cwd=str(ROOT), env=env,
+                            capture_output=True, text=True).returncode
+        self.assertEqual(rc, 4)
+        self.assertEqual(self.data()["publish_board"], {"configured": False})
+        self.assertIn("board: not configured",
+                      (self.meta / "board-publish.log").read_text(encoding="utf-8"))
+
+    def test_cron_publishes_the_board_between_the_watchdog_and_health(self) -> None:
+        text = (ROOT / "bin" / "install-cron.sh").read_text(encoding="utf-8")
+        line = [l for l in text.splitlines() if l.startswith("12 * * * *")][0]
+        self.assertLess(line.index("healthcheck.py --watchdog"),
+                        line.index("board_publish.py"))
+        self.assertLess(line.index("board_publish.py"), line.index("freshness_publish.py"))
+        self.assertIn("logs/board-publish.log", line)
+
+    def test_setup_initialises_the_board_schema(self) -> None:
+        text = (ROOT / "bin" / "freshness-setup.sh").read_text(encoding="utf-8")
+        self.assertLess(text.index("--create-database"), text.index("board_publish.py"))
+        self.assertLess(text.index('board_publish.py" --init'),
+                        text.index('freshness_publish.py" --init'))
+
 
 class SignalTest(HeartbeatCase):
     """Bash runs the EXIT trap from its signal handler with $? still 0, so
@@ -272,6 +326,11 @@ class TrapSafetyTest(unittest.TestCase):
     def test_the_publisher_does_not_inherit_the_vault_lock(self) -> None:
         text = (ROOT / "bin" / "_common.sh").read_text(encoding="utf-8")
         line = [l for l in text.splitlines() if "freshness-publish.log" in l][0]
+        self.assertIn("9>&-", line)
+
+    def test_the_board_publisher_does_not_inherit_the_vault_lock(self) -> None:
+        text = (ROOT / "bin" / "_common.sh").read_text(encoding="utf-8")
+        line = [l for l in text.splitlines() if "board-publish.log" in l][0]
         self.assertIn("9>&-", line)
 
 

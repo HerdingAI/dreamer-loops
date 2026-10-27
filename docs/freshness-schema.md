@@ -37,6 +37,42 @@ SELECT axis, kind, label, status, age_seconds, reason,
 Read `laptop_reachable` first. When it is `false`, every `status` is the
 last-known value, not the current one.
 
+## Reading it safely
+
+- Use autocommit or close the transaction after each read. Dreamer bounds its
+  own lock waits, so an idle open transaction cannot hang a job, but it can
+  make a publish time out and leave the snapshot one hour older.
+- Poll no faster than once a minute; the data changes after a job (a handful
+  of times a night) and once an hour.
+- The schema is created by Dreamer. Do not add columns to these tables; build
+  your own views or tables beside them.
+
+## Axis ids
+
+| Axis | Kind | Window |
+|---|---|---|
+| `source.claude-export` | source | 10 days |
+| `source.cc-sessions` | source | 3 days |
+| `source.owner-writes` | source | reported only |
+| `job.ingest-cc` | job | 28 hours |
+| `job.nightly-extract` | job | 28 hours |
+| `job.nightly-assess` | job | 28 hours |
+| `job.night-cycle` | job | 28 hours |
+| `job.weekly-dream` | job | 28 hours |
+| `job.decay-archive` | job | 8 days |
+| `job.healthcheck` | job | 16 hours |
+| `converge.extraction` | convergence | 2 days |
+| `converge.assessment` | convergence | 2 days |
+| `converge.folds` | convergence | 7 days |
+| `converge.search-index` | convergence | 30 hours |
+| `output.conclusion` | output | reported only |
+| `output.digest` | output | reported only |
+| `publish.postgres` | publish | 3 hours |
+| `publish.board` | publish | 3 hours; `info` / `disabled` unless the owner enabled the board publisher |
+
+`threshold_hours` on each row carries the window, so a display never needs to
+hardcode this table.
+
 ## Tables
 
 | Table | Rows | Contents |
@@ -57,3 +93,25 @@ last-known value, not the current one.
 | `publish` | Dreamer has not published successfully for 3 hours |
 
 Windows live under `freshness:` in `config.yaml`.
+
+## Operating it
+
+| Question | Command |
+|---|---|
+| What does the display see? | `scripts/freshness_publish.py --show` |
+| What does Dreamer compute locally? | `scripts/freshness.py --json` |
+| Did the last publish work? | `tail logs/freshness-publish.log` |
+| Recreate the view after changing `reachable_max_age_hours` | `scripts/freshness_publish.py --init` |
+| First-time setup | `bin/freshness-setup.sh` |
+
+Troubleshooting:
+
+- **`publish: not configured`** — `~/.config/dreamer/postgres.env` is missing.
+- **`publish: failed (OperationalError)`** — host unreachable, wrong
+  credentials, or a statement hit the 10-second timeout. The next publish
+  retries with a complete snapshot; nothing queues.
+- **Every job axis reads `never`** — `vault/.vault-meta/heartbeats.json` was
+  lost (it is git-ignored, so a fresh clone starts empty). Each axis recovers
+  the next time its job runs.
+- **`laptop_reachable` is false but the laptop is on** — the hourly cron line
+  is missing; run `bin/install-cron.sh`.
