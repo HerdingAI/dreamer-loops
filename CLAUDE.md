@@ -413,6 +413,39 @@ resolves for decay; rule 2 binds every night thereafter.
    derived assessment narratives. Numeric progress percentages, point scores, or completion gauges
    are strictly forbidden (`no-numeric-progress` healthcheck invariant).
 
+## 17. Knowledge frontier
+
+The frontier maps what the owner knows against what each active goal needs,
+and teaches the gaps as lessons delivered to the lesson consumer (the "show":
+whatever app the owner configures under `frontier.show_url`, off by default).
+
+1. **Owner words only.** Only a Human turn's own words place an item in a
+   known quadrant; pasted material is trimmed first. An assistant
+   reply, a Dreamer page, a lesson the owner heard and a loop title are
+   exposure at most (rule 13). An evidence quote is verbatim from a Human turn
+   or empty, never filled with Dreamer text.
+2. **Every lesson claim is cited and verified.** A claim cites a primary
+   source whose passage, fetched by code, states it. A claim without
+   one is dropped, and a lesson that cannot teach without it is not made. An
+   independent check that sees the lesson beside its passages rejects
+   anything else, and the release step refuses a lesson that fails
+   `lesson_integrity` whatever the healthcheck reports.
+3. **The ceiling.** At most `frontier.weekly_ceiling` new lessons are released
+   in any trailing `frontier.ceiling_window_days`. Follow-ups are
+   exempt. A week with none is normal; nothing is padded to fill it.
+4. **The egress gate.** Research sends generic questions only, for every goal,
+   whatever its topic. `scripts/egress_check.py` checks each query
+   before the call and inside it; a failing query is dropped, never
+   rewritten. Rule 12 applies in full.
+5. **Restricted calls.** Every frontier model call except research is sealed:
+   no tools, no MCP servers, input inlined. Each has a named contract
+   and fails per item, never per run.
+6. **Taps.** A "Got it" or "Dig deeper", from the consumer or through Claude, is
+   applied once; only an owner write undoes it. Every quadrant change
+   records its cause.
+7. **No numbers.** The map page and any display show no counts, ratios or scores
+   (rule 16.6 extended).
+
 ---
 
 ## Output discipline

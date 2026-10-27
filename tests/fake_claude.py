@@ -260,9 +260,200 @@ def assess_fold_reply(prompt: str) -> dict:
         "trajectory_line": f"Advancement recorded on {t}",
     }
 
+# --------------------------------------------------------------------------
+# Knowledge-frontier calls. Each prompt's FIRST LINE is its marker:
+# transcripts and goal pages can contain any marker string, so routing never
+# looks past the first line. Every frontier PROMPT.md must have an entry here
+# (tests/test_frontier_llm.py checks that each marker reaches its own responder).
+# --------------------------------------------------------------------------
+
+FRONTIER_SCRIPT = Path(os.environ.get(
+    "DREAMER_FAKE_FRONTIER_SCRIPT", str(HERE / "fixtures" / "frontier" / "script.json")))
+
+
+def _frontier_script() -> dict:
+    return json.loads(FRONTIER_SCRIPT.read_text(encoding="utf-8"))
+
+
+def frontier_extract_reply(prompt: str) -> dict:
+    """Concepts per transcript, by slug, from the script's "extract" table."""
+    table = _frontier_script().get("extract", {})
+    concepts = []
+    for rel in re.findall(r"^=== TRANSCRIPT (\S+) ===$", prompt, re.M):
+        for c in table.get(rel.rsplit("/", 1)[-1], []):
+            concepts.append({**c, "transcript": rel})
+    return {"concepts": concepts}
+
+
+def frontier_match_reply(prompt: str) -> dict:
+    """attach when a neighbour has the concept's title, batch_ref when an
+    earlier concept does, else new. The script's "match" table overrides by
+    lower-cased title: "new", or {"attach": "K7001"}."""
+    overrides = _frontier_script().get("match", {})
+    earlier = {int(i): t.strip().lower() for i, t in
+               re.findall(r"^- #(\d+) \| ([^|]*) \|", prompt, re.M)}
+    for i, t in re.findall(r"^### Concept (\d+)\n- title: (.*)$", prompt, re.M):
+        earlier[int(i)] = t.strip().lower()
+    decisions = []
+    for m in re.finditer(r"^### Concept (\d+)\n- title: (.*)\n- summary: .*\n((?:  - K.*\n?)*)",
+                         prompt, re.M):
+        idx, title = int(m.group(1)), m.group(2).strip().lower()
+        neighbours = {t.strip().lower(): k for k, t in
+                      re.findall(r"^  - (K\d+) \| ([^|]*) \|", m.group(3), re.M)}
+        d = {"concept": idx, "decision": "new", "item": None, "batch_ref": None,
+             "justification": "scripted: no clear match"}
+        ov = overrides.get(title)
+        if ov == "new":
+            pass
+        elif isinstance(ov, dict) and "attach" in ov:
+            d.update(decision="attach", item=ov["attach"], justification="scripted attach")
+        elif title in neighbours:
+            d.update(decision="attach", item=neighbours[title], justification="same title")
+        else:
+            ref = next((i for i, t in sorted(earlier.items()) if t == title and i < idx), None)
+            if ref is not None:
+                d.update(decision="batch_ref", batch_ref=ref, justification="same title earlier")
+        decisions.append(d)
+    return {"decisions": decisions}
+
+
+def frontier_premortem_reply(prompt: str) -> dict:
+    """The script's "premortem" table by goal id; else one scripted cause."""
+    m = re.search(r"^- id: (G\d+)$", prompt, re.M)
+    table = _frontier_script().get("premortem", {})
+    if m and m.group(1) in table:
+        return table[m.group(1)]
+    return {"causes": [{"cause": "Scripted failure cause",
+                        "candidates": [{"title": "Scripted gap", "summary": "A scripted gap."}]}]}
+
+
+def _candidate_title(prompt: str, label: str) -> str:
+    m = re.search(rf"^- {label}: (.*)$", prompt, re.M)
+    return m.group(1).strip().lower() if m else ""
+
+
+def frontier_check_reply(prompt: str) -> dict:
+    """The script's "check" table by candidate title (lower-cased); else none.
+    A "requires" string models a judge that can only answer from what reached
+    the prompt: if it is absent the reply is none."""
+    none = {"owner_discussed": "none", "quote": "", "matches_item": None, "exposed_in": []}
+    entry = dict(_frontier_script().get("check", {}).get(_candidate_title(prompt, "candidate title"), none))
+    need = entry.pop("requires", None)
+    return none if need and need not in prompt else entry
+
+
+def frontier_consequence_reply(prompt: str) -> dict:
+    table = _frontier_script().get("consequence", {})
+    return table.get(_candidate_title(prompt, "candidate"),
+                     {"verdict": "tactical", "reason": "scripted default"})
+
+
+def _concept(prompt: str) -> str:
+    return _candidate_title(prompt, "concept")
+
+
+def frontier_queries_reply(prompt: str) -> dict:
+    """The script's "queries" table by concept title (lower-cased)."""
+    return _frontier_script().get("queries", {}).get(
+        _concept(prompt), {"queries": ["how do practitioners test this idea"]})
+
+
+def frontier_research_reply(prompt: str) -> dict:
+    script = _frontier_script()
+    reply = script.get("research", {}).get(_concept(prompt), {"results": []})
+    # Stand in for the PostToolUse hook (scripts/egress_results_hook.py): record the URLs the
+    # "search" returned. The script's "research_recorded" table overrides which ones, so a test
+    # can have the model return a URL no search produced.
+    path = os.environ.get("DREAMER_EGRESS_RESULTS")
+    if path:
+        recorded = script.get("research_recorded", {}).get(
+            _concept(prompt), [r["url"] for r in reply.get("results", [])])
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write("".join(u + "\n" for u in recorded))
+    return reply
+
+
+def frontier_claims_reply(prompt: str) -> dict:
+    return _frontier_script().get("claims", {}).get(_concept(prompt), {"claims": []})
+
+
+def frontier_compose_reply(prompt: str) -> dict:
+    return _frontier_script().get("compose", {}).get(
+        _concept(prompt), {"teachable": False, "title": "", "body": ""})
+
+
+def frontier_lesson_check_reply(prompt: str) -> dict:
+    return _frontier_script().get("lesson_check", {}).get(
+        _concept(prompt), {"verdict": "pass", "failed": [], "reasons": []})
+
+
+FRONTIER_MARKERS = {
+    "# Frontier extract": frontier_extract_reply,
+    "# Frontier match": frontier_match_reply,
+    "# Frontier premortem": frontier_premortem_reply,
+    "# Frontier check": frontier_check_reply,
+    "# Frontier consequence": frontier_consequence_reply,
+    "# Frontier queries": frontier_queries_reply,
+    "# Frontier research": frontier_research_reply,
+    "# Frontier claims": frontier_claims_reply,
+    "# Frontier compose": frontier_compose_reply,
+    "# Frontier lesson-check": frontier_lesson_check_reply,
+}
+
+
+def frontier_route(prompt: str):
+    """(call name, responder) when the first line is a frontier marker, else None."""
+    first = prompt.split("\n", 1)[0].strip()
+    fn = FRONTIER_MARKERS.get(first)
+    return (first, fn) if fn else None
+
+
+def frontier_failure(call: str, valid: dict, state_dir: Path):
+    """Failure injection: DREAMER_FAKE_FRONTIER_FAIL="extract=malformed:1,match=exit".
+
+    Modes: malformed (truncated JSON), empty, prose (valid JSON inside chatty
+    prose), xml (a tool call written as text, what a sealed model does when it
+    "wants" a tool), fenced (valid JSON in a ```json fence: tolerated), exit
+    (nonzero exit, no output). ":n" limits the mode to the first n calls of
+    that kind; the count lives in state_dir so it survives between calls.
+    Returns the raw reply, or None for a normal answer."""
+    for part in filter(None, os.environ.get("DREAMER_FAKE_FRONTIER_FAIL", "").split(",")):
+        name, _, spec = part.partition("=")
+        if name.strip() != call:
+            continue
+        mode, _, limit = spec.partition(":")
+        counter = state_dir / f".fake-frontier-count-{call}"
+        n = int(counter.read_text()) if counter.exists() else 0
+        counter.write_text(str(n + 1))
+        if limit and n >= int(limit):
+            return None
+        body = json.dumps(valid)
+        if mode == "malformed":
+            return body[: max(1, len(body) // 2)]
+        if mode == "empty":
+            return ""
+        if mode == "prose":
+            return f"Sure, here is the JSON you asked for:\n{body}\nLet me know if you want changes."
+        if mode == "xml":
+            return "<function_calls><invoke name=\"Read\"><parameter name=\"file_path\">x</parameter></invoke></function_calls>"
+        if mode == "fenced":
+            return f"```json\n{body}\n```"
+        if mode == "exit":
+            raise SystemExit(3)
+        raise SystemExit(f"unknown DREAMER_FAKE_FRONTIER_FAIL mode {mode!r}")
+    return None
+
 
 def main() -> int:
     prompt = Path(sys.argv[1]).read_text(encoding="utf-8")
+    routed = frontier_route(prompt)
+    if routed:
+        marker, fn = routed
+        valid = fn(prompt)
+        call = marker.split()[-1]
+        raw = frontier_failure(call, valid, Path(sys.argv[1]).resolve().parent)
+        sys.stdout.write(raw if raw is not None else json.dumps(valid, indent=2))
+        return 0
     # Thread-fold first: its prompt embeds raw transcript content, which could
     # contain any of the other responders' marker strings.
     if "# Thread fold" in prompt:

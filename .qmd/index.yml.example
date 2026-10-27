@@ -14,3 +14,8 @@ collections:
     path: vault/sources/transcripts
   conclusions:
     path: vault/conclusions
+  # The knowledge frontier's own pages (items, lessons, pre-mortems), searched by
+  # scripts/qmd_client.py and refreshed by bin/frontier.sh. Build it once with
+  # `qmd update && qmd embed`, or let the first nightly frontier run do it.
+  frontier:
+    path: vault/frontier

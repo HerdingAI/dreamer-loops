@@ -1,0 +1,10 @@
+{
+  "extract": {
+    "2029-12-21--batching-the-glaze": [
+      {"title": "Glaze batching", "summary": "Mixing a glaze by weight rather than by volume.",
+       "kind": "decided", "quote": "Decision: mix the first glaze with fifty grams of frit per bucket.",
+       "goals": []}
+    ]
+  },
+  "match": {}
+}

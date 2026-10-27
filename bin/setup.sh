@@ -32,6 +32,10 @@ copy_if_absent .mcp.json.example .mcp.json
 mkdir -p .qmd
 copy_if_absent .qmd/index.yml.example .qmd/index.yml
 
+# The frontier's pages live here; the `frontier` qmd collection points at it, so
+# it must exist (a fresh clone ships it with .gitkeep files, this repairs a trimmed one).
+mkdir -p vault/frontier/items vault/frontier/lessons vault/frontier/premortems
+
 echo
 echo "checking dependencies:"
 missing=0

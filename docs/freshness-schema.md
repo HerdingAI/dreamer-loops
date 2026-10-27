@@ -62,15 +62,20 @@ last-known value, not the current one.
 | `job.night-cycle` | job | 28 hours |
 | `job.weekly-dream` | job | 28 hours |
 | `job.decay-archive` | job | 8 days |
+| `job.frontier` | job | 28 hours |
 | `job.healthcheck` | job | 16 hours |
 | `converge.extraction` | convergence | 2 days |
 | `converge.assessment` | convergence | 2 days |
+| `converge.frontier-map` | convergence | 3 days; transcripts the knowledge-frontier map has not caught up with (never mapped, or grown since). `info` / `map not started` until the map ledger exists; a chat the map gave up on is not counted (see `frontier-stuck-items`) |
+| `converge.premortem` | convergence | `frontier.premortem_every_days` plus 3 days of slack (10 days as shipped); an active goal whose newest pre-mortem, or its creation when it has none, is older than that |
 | `converge.folds` | convergence | 7 days |
 | `converge.search-index` | convergence | 30 hours |
 | `output.conclusion` | output | reported only |
 | `output.digest` | output | reported only |
 | `publish.postgres` | publish | 3 hours |
 | `publish.board` | publish | 3 hours; `info` / `disabled` unless the owner enabled the board publisher |
+| `publish.frontier` | publish | 3 hours; `info` / `disabled` unless `DREAMER_PUBLISH_FRONTIER=1` (the knowledge-map publisher) |
+| `publish.lesson-sync` | publish | 28 hours; `info` / `disabled` while `frontier.show_url` is empty (the opt-in lesson sync); judged from the newest pull or push in the sync state file |
 
 `threshold_hours` on each row carries the window, so a display never needs to
 hardcode this table.

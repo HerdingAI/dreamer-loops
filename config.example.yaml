@@ -18,6 +18,7 @@ paths:
   sources:         vault/sources/transcripts
   loops:           vault/loops
   goals:           vault/goals
+  frontier:        vault/frontier
   conclusions:     vault/conclusions
   concepts:        vault/concepts
   archive:         vault/archive
@@ -163,6 +164,20 @@ budget:
   # (one attachment into one goal's assessment) runs RESTRICTED, no tools.
   max_turns_assess: 30
   max_turns_assess_fold: 8
+  # The gated research call (run_claude gated): WebSearch only, behind the
+  # egress hook. Each approved query costs about one turn.
+  max_turns_frontier_research: 8
+  # The sealed frontier calls (restricted mode clamps turns at 4). Each reads
+  # an inlined prompt and answers with one JSON object.
+  max_turns_frontier_extract: 4
+  max_turns_frontier_match: 4
+  max_turns_frontier_premortem: 4
+  max_turns_frontier_check: 4
+  max_turns_frontier_consequence: 4
+  max_turns_frontier_queries: 4
+  max_turns_frontier_claims: 4
+  max_turns_frontier_compose: 4
+  max_turns_frontier_lesson_check: 4
   # Model for headless job runs. The jobs are high-volume and structured, so
   # a cheaper model per call means more calls before any usage window closes.
   model: sonnet
@@ -195,6 +210,8 @@ freshness:
   extract_lag_days: 2
   # Same for goal assessment (only judged while a goal is active).
   assess_lag_days: 2
+  frontier_map_lag_days: 3    # converge.frontier-map: a transcript waiting this long to be mapped (one batch a night; a long backfill reads stale by design)
+  frontier_premortem_slack_days: 3   # converge.premortem: an active goal is stale this long PAST frontier.premortem_every_days without a pre-mortem
   # Last successful Postgres publish older than this reads stale (opt-in).
   publish_max_age_hours: 3
   # Postgres publisher: connect timeout, per-statement and lock-wait cap, and a
@@ -256,6 +273,7 @@ thread:
 # --- health (mechanical self-checks; see CLAUDE.md rule 15) ---------------
 health:
   checked_max_age_hours: 16   # longest quiet gap in the cron schedule + slack
+  detail_max_ids: 8           # ids a frontier assertion names in its one-line detail; the rest are counted
   embed_pending_max: 50       # docs awaiting embedding before retrieval counts degraded
   index_stale_hours: 30       # nightly reindex cadence + slack
   untagged_window_days: 14    # window for the vocabulary-applied check
@@ -265,9 +283,215 @@ health:
                               # - {flag: my_gate, text: "acceptance gate still open"}
                               # closed by vault/.vault-meta/gate-state.json {"my_gate": true}
 
+# --- knowledge frontier (map of what you know + the lesson stream) ---------
+frontier:
+  # How long a frontier CLI waits for wiki.lock before giving up (seconds).
+  vault_lock_wait_seconds: 20
+  # Frontier publisher (scripts/frontier_publish.py): how long it waits for wiki.lock
+  # before skipping this hour silently, and the hard cap on one publish (process ends).
+  publish_lock_wait_seconds: 5
+  publish_deadline_seconds: 30
+  # Minimum length of the cause recorded on an undo (tombstone + move).
+  cause_min_chars: 8
+  # An owner turn longer than this keeps its head and tail (half each) and
+  # marks the cut: long turns are mostly pasted material.
+  owner_turn_max_chars: 3000
+  # Paragraphs kept on each side of a qmd hit's matched line (owner_text.passages).
+  passage_window_paragraphs: 1
+  # Warm qmd client (scripts/qmd_client.py): per-call timeout, including the
+  # first call's model load. Past it the result is "degraded", never "empty".
+  qmd_timeout_seconds: 20
+  # Hits requested per qmd query when the caller does not say.
+  qmd_default_limit: 10
+  # Map builder (scripts/frontier_map.py, bin/frontier-backfill.sh).
+  # Owner text per extraction batch.
+  map_batch_chars: 80000
+  # Hard cap on any frontier prompt; retrieved neighbours are dropped lowest-ranked first.
+  prompt_max_chars: 120000
+  # Neighbours retrieved from the `frontier` collection per concept (recall-tuned).
+  match_top_k: 5
+  # Concepts judged per match call; later chunks also see the earlier concepts of the batch.
+  match_chunk_concepts: 40
+  # Concepts kept per transcript (learnable concepts, not every topic).
+  max_items_per_transcript: 8
+  # A malformed reply is retried this many times before the chat is deferred(parse).
+  parse_retries: 1
+  # Deferred(parse) runs per chat before it is skipped with a degraded event.
+  max_parse_attempts: 3
+  # Loop statuses that seed a known-unknown item (unresolved ones; not archived/resolved).
+  seed_loop_statuses: [open, researching, paused, decision-only]
+  # File names under paths.meta: the per-transcript map ledger, and the lock that
+  # keeps the nightly job and the backfill from overlapping (held for the whole run;
+  # wiki.lock is taken only around each apply-and-commit step).
+  map_ledger_file: frontier-map-ledger.json
+  lock_file: frontier.lock
+  # The "show": whatever app consumes lessons (scripts/frontier_sync.py; contract in
+  # docs/frontier-schema.md). OFF while show_url is empty: no token is read and no
+  # request is made. Dreamer starts every exchange: lessons and the known list go out,
+  # status and taps come back. The URL must be https (loopback http is also accepted;
+  # any other http needs allow_insecure_http). The token lives in show_env_path
+  # (KEY=VALUE, key DREAMER_LESSON_TOKEN); env DREAMER_SHOW_ENV overrides the path.
+  show_url: ""
+  allow_insecure_http: false
+  show_timeout_seconds: 10
+  show_env_path: ~/.config/dreamer/show.env
+  # Sync cursor, conflicts and known-list hash, under paths.meta.
+  sync_state_file: frontier-sync.json
+  # Known-known titles sent to the show (newest evidence first).
+  known_push_max: 200
+  # Release ceiling: at most this many NEW lessons released in any trailing
+  # ceiling_window_days. Follow-ups are exempt; a failed lesson frees its slot.
+  weekly_ceiling: 3
+  ceiling_window_days: 7
+  # A released lesson not aired within this many days becomes failed.
+  air_deadline_days: 7
+  # MCP tools what_do_i_know / get_frontier: items returned per call, newest evidence first;
+  # more are flagged `more: true`, not sent.
+  mcp_max_items: 20
+  # Follow-up lessons one item may hold (rejected and dropped ones do not count).
+  max_follow_ups_per_item: 2
+  # Pre-mortem (scripts/frontier_gaps.py). A goal is due when its last
+  # pre-mortem is older than this many days (or its plan changed).
+  premortem_every_days: 7
+  # Map items (title + quadrant) retrieved with the goal text for the pre-mortem prompt.
+  premortem_map_items: 40
+  # Failure causes accepted from one pre-mortem reply (ranked, most likely first).
+  premortem_max_causes: 6
+  # Pieces of knowledge accepted per failure cause.
+  max_candidates_per_cause: 3
+  # Never-discussed check: hits requested from EACH collection below per candidate
+  # (recall-tuned; the judge, not retrieval, decides).
+  check_top_k: 8
+  # Plus a keyword search on the title alone per collection, appended after the hits above.
+  check_title_lex_k: 5
+  # Plus the owner's own phrases, appended last: the title split at punctuation and
+  # these words, each part with at least check_phrase_min_words content words (as
+  # check_owner_* defines them) searched in every chat's owner turns. The keyword
+  # search ANDs a whole title, so a chat where the owner said one half of a compound
+  # title in passing would otherwise never be shown. The chats with the most phrases,
+  # newest first, are kept.
+  check_phrase_split_words: [and, or, versus, vs, "&"]
+  check_phrase_min_words: 2
+  check_phrase_max_chats: 5
+  check_collections: [frontier, transcripts, vault, conclusions]
+  # Characters of passages shown to the check judge per hit file.
+  check_passage_chars: 1500
+  # The owner's own paragraphs added per hit CHAT (owner_text.owner_passages): qmd's
+  # best line usually sits in a long assistant reply, which alone can only show exposure.
+  # A separate budget, so assistant passages never crowd the owner's words out.
+  check_owner_chars: 1500
+  # Owner paragraphs picked by shared words with the candidate (beyond the question
+  # each assistant hit answered), and the most characters shown of any one paragraph.
+  check_owner_paragraphs: 3
+  check_owner_paragraph_chars: 600
+  # Word match: a shared title stem scores check_owner_title_weight, a shared summary
+  # stem 1; a paragraph needs check_owner_min_score (so one title word, or two summary words).
+  check_owner_min_score: 2
+  check_owner_title_weight: 2
+  # A stem is a word's first check_owner_stem_chars letters; shorter words and
+  # these function words never count.
+  check_owner_stem_chars: 5
+  check_owner_min_word_chars: 3
+  check_owner_stopwords: [about, above, after, again, against, all, also, and, any, are, because, been,
+    before, being, below, between, both, but, can, could, did, does, doing, don't, down, during, each,
+    even, every, few, for, from, further, get, gets, getting, going, had, has, have, having, her, here,
+    him, his, how, i'm, into, it's, its, just, know, like, lot, make, makes, many, may, maybe, might,
+    more, most, much, must, not, now, off, once, one, only, other, our, out, over, own, really, same,
+    she, should, some, something, still, such, than, that, the, their, them, then, there, these, they,
+    thing, things, think, this, those, through, too, under, until, use, used, using, very, want, was,
+    way, well, were, what, when, where, which, while, who, whom, why, will, with, within, without,
+    would, yes, yet, you, your]
+  # Records live in paths.frontier/<this>/<goal>/<date>.md.
+  premortems_dir: premortems
+  # Web egress gate (scripts/egress_check.py, scripts/egress_hook.py).
+  egress:
+    # Word list for the capitalised-token check. A missing file blocks every
+    # capitalised token (fail closed).
+    dictionary_path: /usr/share/dict/words
+    # Owner and third-party names, one per line, matched case-insensitively.
+    # A missing, unreadable or empty file blocks every query (fail closed).
+    blocked_names_path: ~/.config/dreamer/egress-blocked.txt
+    # Capitalised terms that name no person or private entity. Add a term only
+    # when it is a product, place or field name.
+    allowed_proper_nouns: []
+    # A run of this many words copied from the goal page or the item's
+    # evidence blocks the query.
+    phrase_run_words: 4
+    # A 4-digit run counts as a year (allowed) only inside this range.
+    year_min: 1900
+    year_max: 2100
+    # Every query, allowed or denied, one JSON line each (relative paths resolve against the repo root).
+    log_path: logs/frontier-egress.jsonl
+    # A DNS lookup for a fetch gives up after this many seconds (fail closed).
+    dns_timeout_seconds: 5
+  # Lessons (scripts/frontier_lessons.py, scripts/verify_passages.py).
+  # Lessons researched per night, follow-ups first (the research budget; the release ceiling is weekly_ceiling).
+  research_per_night: 3
+  # Generic questions the queries call may write per lesson.
+  max_queries_per_lesson: 3
+  # Web pages code will fetch per lesson, and so the most URLs the research call may return.
+  # Refused pages (PDF, 403) count against the cap, and the two-domain rule needs two that load.
+  max_fetches_per_lesson: 6
+  # A web source's label (page title, else search title, else domain) is cut to this many characters.
+  source_title_max_chars: 160
+  # A fetch (all hops together) stops after this many seconds, and refuses a body past this many bytes.
+  fetch_timeout_seconds: 15
+  fetch_max_bytes: 1500000
+  # Bytes read per chunk while counting a body against fetch_max_bytes.
+  fetch_chunk_bytes: 16384
+  # Redirect hops followed (each hop is re-checked like the first URL).
+  fetch_max_redirects: 3
+  fetch_user_agent: "Mozilla/5.0 (compatible; DreamerResearch/1.0)"
+  # Hosts where each subdomain is a different owner: the registrable domain keeps the subdomain.
+  shared_host_suffixes: [github.io, gitlab.io, blogspot.com, substack.com, medium.com, wordpress.com, netlify.app, vercel.app, pages.dev, web.app]
+  # A quoted passage counts when this many normalised tokens appear as one run in its source.
+  passage_min_run_tokens: 8
+  # The verified span kept for a passage is cut to this many characters.
+  passage_max_chars: 400
+  # Text that looks like an instruction to a model (rule 10). A source span matching one is
+  # flagged and unusable; a body matching one is rejected by code.
+  instruction_patterns:
+    - '\b(ignore|disregard|forget|override)\b[^.\n]{0,40}\b(previous|prior|above|earlier|all|any|your)\b[^.\n]{0,30}\b(instructions?|prompts?|rules?|directions?)\b'
+    - '\b(system|developer) (prompt|message|instructions?)\b'
+    - '\byou (must|should) now\b'
+    - '\b(do not|don.t) (tell|reveal|mention)\b[^.\n]{0,30}\b(user|owner|reader|anyone)\b'
+    - '\b(call|invoke|run|execute|use) the (tool|function|command|shell)\b'
+    - '\b(fetch|visit|open|navigate to|send (it|this|the \w+) to)\b[^.\n]{0,20}https?://'
+    - '</?\s*(system|assistant|tool|function_calls|invoke)\b'
+    - '\bas an ai (language )?model\b'
+  # Library passages: hits per lesson, and lines read around each hit with `qmd get`.
+  lesson_wisdom_hits: 3
+  lesson_wisdom_window_lines: 60
+  # ...cut to this many characters around the match: a library transcript can hold
+  # a whole chapter on one line. The match is found by the first this-many characters
+  # of qmd's snippet (verbatim document text; the snippet itself is never source text).
+  lesson_wisdom_window_chars: 6000
+  lesson_wisdom_anchor_chars: 40
+  # Owner words (earlier turns) a lesson about an unknown known may cite.
+  lesson_owner_sources: 3
+  # Characters of each source shown to the claims call (verification reads the whole source).
+  lesson_source_chars: 12000
+  # Claims accepted from one claims reply.
+  lesson_max_claims: 12
+  # Rewrites a rejected lesson gets, each judged afresh; security rejections are never rewritten.
+  lesson_max_revisions: 2
+  # The research ledger beside the map ledger (paths.meta).
+  research_ledger_file: frontier-research-ledger.json
+  # A finished lesson that finds wiki.lock busy waits here (a directory under paths.meta,
+  # gitignored) and is applied by the next run without a model or web call.
+  pending_dir: frontier-pending
+  # Where the approved queries for the gated research call are written (paths.logs).
+  research_approved_file: .egress-approved-frontier-research.txt
+
+# Locks shared by the cron jobs (bin/_common.sh).
+locks:
+  # A job that finds wiki.lock held waits this long (seconds) before skipping its run:
+  # a frontier apply holds it for seconds, so the job waits instead of losing the night.
+  cron_wait_seconds: 120
+
 # --- qmd (search index) ---------------------------------------------------
 qmd:
-  collections: [vault, transcripts, conclusions, wisdom]
+  collections: [vault, transcripts, conclusions, wisdom, frontier]
 
 # --- MCP ------------------------------------------------------------------
 mcp:

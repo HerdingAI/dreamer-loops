@@ -80,10 +80,12 @@ class RecordTest(HeartbeatCase):
     def test_garbled_file_loads_empty(self) -> None:
         (self.meta / "heartbeats.json").write_text("{not json", encoding="utf-8")
         self.assertEqual(HB.load(self.meta),
-                         {"jobs": {}, "runs": [], "publish": {}, "publish_board": {}})
+                         {"jobs": {}, "runs": [], "publish": {}, "publish_board": {},
+                          "publish_frontier": {}})
         (self.meta / "heartbeats.json").write_text("[1, 2]", encoding="utf-8")
         self.assertEqual(HB.load(self.meta),
-                         {"jobs": {}, "runs": [], "publish": {}, "publish_board": {}})
+                         {"jobs": {}, "runs": [], "publish": {}, "publish_board": {},
+                          "publish_frontier": {}})
 
     def test_concurrent_records_lose_nothing(self) -> None:
         procs = [subprocess.Popen(
