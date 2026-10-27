@@ -56,6 +56,7 @@ import goals as G  # noqa: E402
 import questions as Q  # noqa: E402
 import vault as V  # noqa: E402
 import freshness as FR  # noqa: E402
+import spine as SP  # noqa: E402
 
 SEVERITIES = ("info", "degraded", "blocking")
 
@@ -779,6 +780,34 @@ def assert_freshness_converged():
                               "convergence axis(es)")
 
 
+def assert_spine_complete():
+    """Every current conclusion that carries a problem type has a valid type
+    and a heading for each stage that type requires (rule 5b). A stage the
+    writer honestly marked missing still has its heading and passes here; the
+    quality grader is what scores it. Reads pages, writes nothing."""
+    base = p("conclusions")
+    bad, seen = [], 0
+    for f in sorted(base.glob("*.md")) if base.exists() else []:
+        try:
+            fm, body = read_page(f)
+        except Exception:  # noqa: BLE001
+            continue
+        ptype = str(fm.get("problem_type") or "")
+        if not ptype or fm.get("superseded_by"):
+            continue
+        seen += 1
+        if ptype not in SP.TYPES:
+            bad.append(f"{f.stem}: unknown problem type")
+            continue
+        absent = [st for st in SP.required(ptype)
+                  if not re.search(rf"^## {re.escape(SP.HEADINGS[st])}\s*$", body, re.M)]
+        if absent:
+            bad.append(f"{f.stem}: no {', '.join(absent)}")
+    if bad:
+        return False, "; ".join(bad)
+    return True, f"{seen} spine conclusion(s) complete"
+
+
 register("embeddings-current", "degraded", (), assert_embeddings_current)
 register("index-fresh", "blocking", ("research",), assert_index_fresh)
 register("collections-covered", "degraded", (), assert_collections_covered)
@@ -800,6 +829,7 @@ register("no-numeric-progress", "info", (), assert_no_numeric_progress)
 register("freshness-jobs", "degraded", (), assert_freshness_jobs)
 register("freshness-sources", "degraded", (), assert_freshness_sources)
 register("freshness-converged", "degraded", (), assert_freshness_converged)
+register("spine-complete", "degraded", (), assert_spine_complete)
 
 
 # --------------------------------------------------------------------------

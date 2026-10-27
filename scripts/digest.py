@@ -297,6 +297,27 @@ def render_friend_section(ref: _dt.date, pending: dict) -> tuple[str, list[str]]
     return "The Friend", lines
 
 
+def conclusion_lines(c: dict, q: dict | None) -> list[str]:
+    """One new conclusion in the digest. A spine conclusion (rule 5b) also
+    shows its problem type and its recommended next step."""
+    mark = ""
+    if q:
+        score = float(q.get("score") or 0)
+        mark = f", quality: {score:.0%}" + ("  ⚠️" if score < 0.7 else "")
+    kind = f", type: `{c['problem_type']}`" if c.get("problem_type") else ""
+    lines = [f"- [[{c['path']}]] — **{c['title']}** "
+             f"(route: `{c.get('route','?')}`, "
+             f"confidence: {c.get('confidence','?')}{kind}{mark})"]
+    if c.get("next_step"):
+        label = "next (provisional)" if c.get("provisional") else "next"
+        lines.append(f"  - {label}: {c['next_step']}")
+    if c.get("spine_defects"):
+        lines.append("  - spine defects: " + "; ".join(c["spine_defects"]))
+    if q and float(q.get("score") or 0) < 0.7 and q.get("failed"):
+        lines.append(f"  - weak on: {q['failed']} — read before trusting")
+    return lines
+
+
 def build(ref: _dt.date | None = None, *, run_stats: dict | None = None,
           quiet_reason: str | None = None) -> Path:
     ref = ref or today()
@@ -375,16 +396,7 @@ def build(ref: _dt.date | None = None, *, run_stats: dict | None = None,
                if isinstance(q, dict)}
     lines = []
     for c in pending.get("conclusions", []):
-        q = quality.get(c.get("loop"))
-        mark = ""
-        if q:
-            score = float(q.get("score") or 0)
-            mark = f", quality: {score:.0%}" + ("  ⚠️" if score < 0.7 else "")
-        lines.append(f"- [[{c['path']}]] — **{c['title']}** "
-                     f"(route: `{c.get('route','?')}`, "
-                     f"confidence: {c.get('confidence','?')}{mark})")
-        if q and float(q.get("score") or 0) < 0.7 and q.get("failed"):
-            lines.append(f"  - weak on: {q['failed']} — read before trusting")
+        lines += conclusion_lines(c, quality.get(c.get("loop")))
     S.add("New conclusions", lines)
 
     # Rule 14: a concluded loop that resurfaced but was judged settled is

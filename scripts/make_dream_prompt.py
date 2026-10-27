@@ -6,6 +6,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from dreamer_common import CFG, atomic_write, p  # noqa: E402
 import vault as V  # noqa: E402
+import spine as SP  # noqa: E402
+
+# The template ends with this heading; the loop's details are appended after
+# it. The spine block goes immediately before, after the return contract.
+LOOP_HEADING = "\n## The loop\n"
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -29,6 +34,12 @@ def main() -> int:
         return 1
 
     tmpl = (ROOT / "skills" / "dream" / "PROMPT.md").read_text(encoding="utf-8")
+    if SP.enabled():
+        if tmpl.count(LOOP_HEADING) != 1:
+            print("dream prompt template has no single '## The loop' heading",
+                  file=sys.stderr)
+            return 1
+        tmpl = tmpl.replace(LOOP_HEADING, "\n" + SP.prompt_block() + LOOP_HEADING)
     lines = [tmpl, "",
              f"- **id**: `{loop.id}`",
              f"- **title**: {loop.title}",
@@ -37,6 +48,11 @@ def main() -> int:
              f"- **first_seen**: {loop.first_seen}",
              f"- **last_seen**: {loop.last_seen}",
              f"- **max fetches**: {CFG['research']['max_fetches_per_loop']}",
+             *([f"- **owner answered**: {loop.reresearch_requested}. The existing "
+                "conclusion was provisional and waiting on this answer; the "
+                "newest occurrence below is it. Do not serve the old conclusion "
+                "(rule 14) — re-research, and take the owner's criteria from "
+                "that occurrence."] if loop.reresearch_requested else []),
              "",
              "### Occurrences (the owner's own words — read these first)",
              ""]

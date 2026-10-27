@@ -21,7 +21,7 @@ log "start"
 # Human turn is quarantined and comes back as an open question (§5.4).
 # The fold-quarantine sweep rides along: entries are synced when they are
 # quarantined, and this catches any that predate that (§5.6).
-"$PY" -c "import sys, json; sys.path.insert(0, '$ROOT/scripts'); import questions as Q; print(json.dumps({'writes': Q.reconcile_owner_writes(), 'fold_quarantine': Q.sync_fold_quarantine()}))" \
+"$PY" -c "import sys, json; sys.path.insert(0, '$ROOT/scripts'); import questions as Q; print(json.dumps({'writes': Q.reconcile_owner_writes(), 'fold_quarantine': Q.sync_fold_quarantine(), 'criteria_answers': Q.apply_criteria_answers()}))" \
   >> "$LOGS/$JOB.log" 2>&1 || record_event "degraded" "owner-write reconciliation failed; see the $JOB log"
 
 # Check active goals count (§4.1: with 0 active goals, clean no-op, evented line, exit 0, no LLM call)

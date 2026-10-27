@@ -18,7 +18,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from dreamer_common import CFG, log, p, read_page, today, write_page  # noqa: E402
 import digest as G  # noqa: E402
+import spine as SP  # noqa: E402
 import vault as V  # noqa: E402
+
+# The digest's "next:" line is one line; a synthesis with no sentence break
+# must not put a paragraph there.
+NEXT_STEP_MAX = 240
 
 VALID_ROUTES = {"wisdom", "web", "past-reasoning", "decision-only", "mixed"}
 # Evidence grades from the vendored autoresearch contract. Citation is not
@@ -113,7 +118,8 @@ def _claims(items, kind: str, problems: list[str]) -> list[dict]:
     return out
 
 
-def render(loop: V.Loop, payload: dict, problems: list[str]) -> str:
+def render(loop: V.Loop, payload: dict, problems: list[str],
+           sp: dict | None = None) -> str:
     s = payload.get("sections") or {}
     route = payload.get("route", "")
     lines: list[str] = [f"# {payload.get('title') or loop.title}", ""]
@@ -121,7 +127,11 @@ def render(loop: V.Loop, payload: dict, problems: list[str]) -> str:
               f"`{payload.get('confidence', 'unknown')}` · {today().isoformat()}_", ""]
 
     if s.get("restated"):
-        lines += ["## The loop, restated", "", s["restated"].strip(), ""]
+        # On a spine page the restatement and the recommendation are stage
+        # text like any other and lose their page structure (rule 10). Legacy
+        # pages are written exactly as before.
+        restated = SP.plain(s["restated"]) if sp else s["restated"].strip()
+        lines += ["## The loop, restated", "", restated, ""]
 
     # Rule 13: partition every bucket into primary vs derived-tier citations.
     # A derived citation (Dreamer's own conclusion, a loop page, a resurfacing
@@ -164,6 +174,19 @@ def render(loop: V.Loop, payload: dict, problems: list[str]) -> str:
                 lines.append(f"  - > {q}")
         lines.append("")
 
+    # Spine diagnosis claims are claims like any other: the primary ones are
+    # tallied in the ledger, and a derived one is capped and quarantined with
+    # the rest instead of standing under Diagnose as a cause shown (rule 13).
+    if sp:
+        for c in sp["derived_diagnosis"]:
+            if c["support"] in ("accepted", "provisional"):
+                problems.append(
+                    f"diagnosis: derived citation {c['citation'][:60]!r} graded "
+                    f"{c['support']} — capped at contested and quarantined (rule 13)")
+                c["support"] = "contested"
+            derived.append(c)
+        all_claims += sp["diagnosis"]
+
     if derived:
         lines += ["## Prior conclusions (derived — hypothesis, not evidence)", "",
                   "> Cited from Dreamer's own earlier output. This is a "
@@ -192,8 +215,16 @@ def render(loop: V.Loop, payload: dict, problems: list[str]) -> str:
                       "Treat the synthesis as a working position, not a finding.",
                       ""]
 
-    if s.get("synthesis"):
-        lines += ["## Synthesis", "", s["synthesis"].strip(), ""]
+    if sp:
+        lines += SP.render_stages(sp, SUPPORT_MARK)
+    synthesis = SP.plain(s.get("synthesis")) if sp else s.get("synthesis")
+    if synthesis:
+        lines += ["## Synthesis", ""] + (SP.synthesis_note(sp) if sp else []) \
+            + [synthesis.strip(), ""]
+    elif sp and "recommend" in sp["missing"]:
+        lines += ["## Synthesis", "", SP.MISSING, ""]
+    if sp:
+        lines += SP.render_check(sp)
 
     subs = s.get("open_sub_questions") or []
     if subs:
@@ -215,6 +246,35 @@ def render(loop: V.Loop, payload: dict, problems: list[str]) -> str:
     return "\n".join(lines)
 
 
+def salvage_split_reply(raw: str) -> tuple[dict | None, str]:
+    """Rejoin a reply the model split with one stray closing brace.
+
+    The known malformed shape: the model closes the root object early, then
+    carries on with `,"web_queries":[…],"fetched_urls":[…]}`. The first object
+    is valid and the remainder is the rest of the same object, so the two are
+    rejoined — those trailing keys are the egress record (rule 12) and must
+    not be lost by keeping only the first half. Anything else is refused: a
+    remainder that is not a comma followed by object members, or a key
+    present in both halves, means this is not that shape and nothing is
+    guessed."""
+    text = (raw or "").strip()
+    try:
+        head, end = json.JSONDecoder().raw_decode(text)
+    except ValueError:
+        return None, ""
+    rest = text[end:].strip()
+    if not isinstance(head, dict) or not rest.startswith(",") or not rest.endswith("}"):
+        return None, ""
+    try:
+        tail = json.loads("{" + rest[1:])
+    except ValueError:
+        return None, ""
+    if not isinstance(tail, dict) or set(tail) & set(head):
+        return None, ""
+    return ({**head, **tail},
+            f"reply had a stray closing brace; rejoined {len(tail)} trailing field(s)")
+
+
 def apply(loop_id: str, payload: dict) -> dict:
     loops = {l.id: l for l in V.load_loops()}
     loop = loops.get(loop_id)
@@ -229,6 +289,9 @@ def apply(loop_id: str, payload: dict) -> dict:
         if not loop.conclusion:
             raise SystemExit(f"{loop.id}: serve action but no conclusion exists")
         loop.status = "paused"
+        # A serve answers a re-research request too: it was considered.
+        # Leaving the mark would re-select the loop on every cycle.
+        loop.reresearch_requested = ""
         loop.save()
         reason = " ".join((payload.get("reason") or "").split())[:300]
         G.stage("served", {"loop": loop.id, "title": loop.title,
@@ -254,12 +317,31 @@ def apply(loop_id: str, payload: dict) -> dict:
 
     loop.route = route
 
+    # The solution spine (rule 5b), only while solving.enabled is true: with
+    # the switch off every payload is a legacy payload, whatever it carries.
+    # None means legacy and nothing below changes for it. A defective spine
+    # lowers confidence; it never raises it.
+    sp = (SP.check(payload, problems, _claims, route, occurrences=loop.occurrences,
+                   is_derived=_is_derived) if SP.enabled() else None)
+    if SP.enabled() and sp is None and payload.get("problem_type"):
+        G.stage("events", {"kind": "degraded", "loop": loop.id,
+                           "detail": "research returned an unknown problem_type; "
+                                     "the conclusion was written in the legacy layout"})
+    # A legacy conclusion clears a type recorded by an earlier spine run, so
+    # the loop page never claims a type its current conclusion does not have.
+    loop.problem_type = sp["type"] if sp else ""
+    loop.reresearch_requested = ""   # this conclusion is the answer to it
+    # Lower only: an undeclared or unknown confidence is not turned into `low`,
+    # which would read as a grade the research never gave.
+    if sp and sp["cap_low"] and payload.get("confidence") in ("high", "medium"):
+        payload = dict(payload, confidence="low")
+
     if route == "decision-only":
         if (payload.get("now") or "").strip():
             problems.append("decision-only route returned a thread 'now' — "
                             "ignored: zero research is its defining property "
                             "and a rebuilt Now claims research happened")
-        framing = _neutralize_structure(
+        framing = (SP.framing(sp) if sp else "") or _neutralize_structure(
             (payload.get("decision_framing") or "").strip(), problems)
         # Surgical, never default_body: rebuilding the whole body destroyed
         # the Thread and Theme sections on the decision-only transition
@@ -273,15 +355,20 @@ def apply(loop_id: str, payload: dict) -> dict:
         loop.status = "decision-only"
         loop.save()
         result = {"loop": loop.id, "route": route, "status": loop.status,
-                  "conclusion": None, "problems": problems}
+                  "conclusion": None, "problems": problems,
+                  "problem_type": sp["type"] if sp else None}
     else:
-        text = render(loop, payload, problems)
+        text = render(loop, payload, problems, sp)
         name = f"{today():%Y-%m-%d}--{_slug(payload.get('title') or loop.title)}.md"
         dest = p("conclusions") / name
         fm = {"type": "conclusion", "loop": loop.id, "route": route,
               "confidence": payload.get("confidence", "unknown"),
               "created": today().isoformat(),
               "title": payload.get("title") or loop.title}
+        if sp:
+            fm["problem_type"] = sp["type"]
+            if sp["provisional"]:
+                fm["provisional"] = True
         # Re-researching a loop used to overwrite `conclusion`, orphaning the
         # previous page: still on disk, linked from nothing, invisible to lint's
         # navigation and to anyone reading the vault. The reasoning history is
@@ -333,9 +420,18 @@ def apply(loop_id: str, payload: dict) -> dict:
                     job="conclusion")
             except AT.FoldError as exc:
                 problems.append(f"thread 'now' rebuild refused: {exc}")
-        G.stage("conclusions", {"path": loop.conclusion, "loop": loop.id,
-                                "title": fm["title"], "route": route,
-                                "confidence": fm["confidence"]})
+        staged = {"path": loop.conclusion, "loop": loop.id, "title": fm["title"],
+                  "route": route, "confidence": fm["confidence"]}
+        if sp:
+            synthesis = _one_line((payload.get("sections") or {}).get("synthesis"))
+            first = re.split(r"(?<=[.!?])\s", synthesis, maxsplit=1)[0]
+            if len(first) > NEXT_STEP_MAX:
+                first = first[:NEXT_STEP_MAX - 1].rstrip() + "…"
+            staged.update(problem_type=sp["type"], next_step=first,
+                          provisional=sp["provisional"],
+                          spine_defects=[pr.removeprefix("spine: ") for pr in problems
+                                         if pr.startswith("spine: ")])
+        G.stage("conclusions", staged)
         n_derived = len(re.findall(r"source: `\s*\[\[\s*(?:conclusions/|"
                                    r"sources/resurfacings/|loops/)", text))
         if n_derived:
@@ -346,7 +442,18 @@ def apply(loop_id: str, payload: dict) -> dict:
             import questions as Q
             Q.note_derived_claims(loop.id, loop.conclusion, n_derived)
         result = {"loop": loop.id, "route": route, "status": loop.status,
-                  "conclusion": loop.conclusion, "problems": problems}
+                  "conclusion": loop.conclusion, "problems": problems,
+                  "problem_type": sp["type"] if sp else None}
+
+    # Asked only once the page (or the framing) is written: a question about
+    # a conclusion that failed to land would point at nothing.
+    if sp and sp["provisional"]:
+        import questions as Q
+        Q.enqueue_question(
+            "criteria",
+            f"I could not find what matters most to you in this choice: "
+            f"{loop.title} — what should the options be judged on?",
+            loop_id=loop.id)
 
     for q in payload.get("web_queries") or []:
         G.stage("web_queries", q)
@@ -366,6 +473,10 @@ def main() -> int:
     raw = sys.stdin.read() if args.input == "-" else Path(args.input).read_text()
     from apply_extraction import _extract_json
     payload = _extract_json(raw)
+    if payload is None:
+        payload, note = salvage_split_reply(raw)
+        if payload is not None:
+            log(f"WARN {note}", job="conclusion")
     if payload is None:
         # The dream leg sets status=researching before running, so an
         # unparseable reply strands the loop there: `researching` never decays

@@ -10,13 +10,15 @@
       "justification": "No existing loop covers cross-session memory persistence."
     },
     "quick-fix.md": {
-      "skip": "resolved in-conversation \u2014 the answer was given and accepted"
+      "skip": "resolved in-conversation — the answer was given and accepted"
     },
     "router-design.md": {
       "title": "Should routing be intent-based or keyword-based?",
       "decision": "new",
       "theme": "routing",
-      "tags": ["not-a-real-tag"],
+      "tags": [
+        "not-a-real-tag"
+      ],
       "justification": "Distinct from memory persistence; nothing similar in catalog."
     },
     "memory-arch-again.md": {
@@ -69,7 +71,7 @@
       "considered": [
         "L0001"
       ],
-      "justification": "Topic resurfaced after the conclusion was written \u2014 reopening rule applies."
+      "justification": "Topic resurfaced after the conclusion was written — reopening rule applies."
     },
     "bad-link.md": {
       "title": "This candidate cites a transcript that does not exist",
@@ -136,7 +138,55 @@
       ],
       "proposed_tags": [
         "note-taking"
-      ]
+      ],
+      "problem_type": "design",
+      "recommended_option": "Plain interlinked Markdown",
+      "define": {
+        "current": "Agent memory has no durable home.",
+        "desired": "One store that survives sessions.",
+        "gap": "File or database has not been chosen.",
+        "why_it_matters": "The question keeps coming back."
+      },
+      "assumptions": [
+        "The corpus stays small enough to read by hand."
+      ],
+      "options": [
+        {
+          "name": "Plain interlinked Markdown",
+          "description": "Pages with frontmatter."
+        },
+        {
+          "name": "SQLite database",
+          "description": "One file, queried."
+        },
+        {
+          "name": "Leave it",
+          "description": "Keep deciding per session."
+        }
+      ],
+      "evaluation": {
+        "criteria": [
+          {
+            "criterion": "Settles the file-or-DB question",
+            "citation": "[[sources/transcripts/2026/08/2026-08-02--memory-arch]]",
+            "quote": "I still don't know whether this should be a file or a DB"
+          },
+          {
+            "criterion": "Invented by the model",
+            "citation": "[[sources/transcripts/2026/08/2026-08-02--memory-arch]]",
+            "quote": "It depends on legibility requirements"
+          }
+        ],
+        "assessment": [
+          {
+            "option": "Plain interlinked Markdown",
+            "criterion": "Settles the file-or-DB question",
+            "verdict": "meets"
+          }
+        ],
+        "premortem": "The index drifts; the first sign is a search that misses a page."
+      },
+      "success_signal": "The question stops recurring for a month."
     },
     "L0003": {
       "route": "decision-only",
