@@ -24,6 +24,8 @@ paths:
   resurfacings:    vault/inbox/resurfacings
   sources:         vault/sources/transcripts
   loops:           vault/loops
+  goals:           vault/goals
+  frontier:        vault/frontier
   conclusions:     vault/conclusions
   concepts:        vault/concepts
   archive:         vault/archive
@@ -82,6 +84,7 @@ current script writes to it.
 corpora:
   claude_export:   /path/to/claude-export
   claude_code_sessions: ~/.claude/projects
+  claude_desktop_sessions: ~/.config/Claude/local-agent-mode-sessions
   wisdom_sources:
     - /path/to/your/library
   wisdom_build:    wisdom_md
@@ -127,6 +130,18 @@ governed by the [`cc_ingest`](#cc_ingest) block below.
 **Without it** (or without ever running `ingest-cc.sh`), nothing breaks — you
 simply track loops from claude.ai conversations only. Point it elsewhere only
 if your Claude Code home is non-standard.
+
+### `claude_desktop_sessions`
+
+Default `~/.config/Claude/local-agent-mode-sessions`. Where the Claude desktop
+app keeps its local agent sessions, one `audit.jsonl` per
+`<account>/<org>/local_<id>/` directory.
+`scripts/convert_desktop_sessions.py` reads them on the same 18:30 job as Claude
+Code sessions, with the same triage floors and the same mandatory credential
+redaction (audit logs hold plaintext secrets). Behaviour is governed by
+[`desktop_ingest`](#desktop_ingest). **Without it** nothing breaks: point it at
+a directory that does not exist, or leave the app uninstalled, and the sweep
+finds nothing.
 
 ### `wisdom_sources`
 
@@ -481,6 +496,84 @@ names here only if there is a project whose sessions you never want tracked.
 
 ---
 
+## `goals`
+
+```yaml
+goals:
+  max_active:                4
+  silence_ping_days:         10
+  movement_stale_days:       21
+  drift_recurrence_min:      3
+  max_open_questions:        2
+  back_off_days:             14
+  silence_escalation_weeks:  3
+  assess_batch_size:         5
+```
+
+Governs the goal assessor (`bin/nightly-assess.sh`, see
+[architecture.md §11](architecture.md#11-goals-and-the-assessor)). Goals are
+authored by you; these keys decide how patient Dreamer is about them.
+
+- `max_active` is enforced deterministically when a goal is committed or
+  resumed. It exists because a long list of live commitments is a list nobody
+  tracks. Lower it if you keep over-committing.
+- `silence_ping_days` is how long an active goal may go without a mention
+  before Dreamer asks about it, and `movement_stale_days` is how long it may go
+  without a step, evidence or a plan change before it counts as stale. Mention
+  and movement are separate clocks on purpose: talking about a goal is not
+  moving it. **How to choose:** set silence to the longest gap you would
+  normally leave a goal alone, and stale to a few multiples of how often its
+  steps usually move.
+- `drift_recurrence_min` is the recency-weighted score at which an open loop
+  that serves no active goal is flagged with "what is this for?". Raise it if
+  you get asked about loops you do not care about.
+- `max_open_questions` is back-pressure on the queue, not a cap on what is
+  kept: questions beyond it wait, and nothing ages out. `back_off_days` is how
+  long a question you deferred is left alone, and `silence_escalation_weeks` is
+  how long silence continues before its question escalates.
+- `assess_batch_size` is the number of transcripts the assessor reads per run,
+  oldest unassessed first. The rest drain on later nights. Raise it only after
+  a large backfill, since each run is one model call.
+
+The owner-write keys that go with this feature live under [`mcp`](#mcp).
+
+---
+
+## `desktop_ingest`
+
+```yaml
+desktop_ingest:
+  ledger:               desktop-ingested.json
+  project_label:        desktop
+  max_sessions_per_run: 10
+```
+
+Claude desktop agent sessions use the same triage floors and quiet window as
+[`cc_ingest`](#cc_ingest); set one of those keys here only to diverge.
+`ledger` is separate so the Claude Code freshness axis keeps meaning Claude
+Code. `project_label` is shown as `project:` on the page, since the app has no
+project dimension. `max_sessions_per_run` bounds a run's summariser spend.
+
+---
+
+## `solving`
+
+```yaml
+solving:
+  enabled: true
+  min_options: 2
+```
+
+The solution spine (rule 5b). `enabled: false` removes the spine request from
+the research prompt and restores the previous page layout, so it is the switch
+to reach for if you want conclusions without the staged structure. `min_options`
+is how many real options a conclusion must list besides the option named
+"Leave it" that every full Options stage includes; a page with fewer is
+flagged and may lose confidence. Two is the smallest number that is
+still a choice.
+
+---
+
 ## `budget`
 
 ```yaml
@@ -490,6 +583,18 @@ budget:
   max_turns_backfill: 80
   max_turns_cc_ingest: 10
   max_turns_thread_fold: 8
+  max_turns_assess: 30
+  max_turns_assess_fold: 8
+  max_turns_frontier_research: 8
+  max_turns_frontier_extract: 4
+  max_turns_frontier_match: 4
+  max_turns_frontier_premortem: 4
+  max_turns_frontier_check: 4
+  max_turns_frontier_consequence: 4
+  max_turns_frontier_queries: 4
+  max_turns_frontier_claims: 4
+  max_turns_frontier_compose: 4
+  max_turns_frontier_lesson_check: 4
   model: sonnet
   cost_ceiling_per_run: null
 ```
@@ -518,6 +623,21 @@ transcript plus the current thread and returns JSON. Both run without tools —
 the fold in fully restricted, output-only mode — so neither should be taking
 turns. A cap this low is a tripwire: hitting it means the prompt is
 misbehaving, not that the job needs more room.
+
+### The goal and frontier budgets
+
+`max_turns_assess` (default `30`) is for the assessor's attachment pass, which
+may read the goal catalog and transcripts. `max_turns_assess_fold` (default `8`)
+is for the per-goal assessment fold, which runs restricted with no tools, like
+the thread fold.
+
+`max_turns_frontier_research` (default `8`) is for the gated research call:
+WebSearch only, and each approved query costs about one turn, so this is also a
+soft cap on queries per lesson. The nine other `max_turns_frontier_*` keys
+(`extract`, `match`, `premortem`, `check`, `consequence`, `queries`, `claims`,
+`compose`, `lesson_check`) are all `4`. They are sealed calls that read an
+inlined prompt and answer with one JSON object, and `run_claude` clamps
+restricted turns at 4, so raising one above 4 changes nothing.
 
 ### `model`
 
@@ -567,12 +687,35 @@ you after a few runs.
 ```yaml
 freshness:
   stale_inbox_days: 10
+  cc_sessions_quiet_days: 3
+  claude_ai_sync_max_age_hours: 36
+  claude_ai_login_warn_days: 3
+  job_max_age_hours: 28
+  weekly_job_max_age_days: 8
+  extract_lag_days: 2
+  assess_lag_days: 2
+  frontier_map_lag_days: 3
+  frontier_premortem_slack_days: 3
+  publish_max_age_hours: 3
+  publish_timeout_seconds: 5
+  publish_statement_timeout_seconds: 10
+  publish_deadline_seconds: 30
+  reachable_max_age_hours: 2
+  run_history_keep: 200
 ```
+
+Windows for the freshness verdicts
+([architecture.md §12](architecture.md#12-freshness-and-heartbeats)). Like the
+health thresholds, they change when an alarm fires, never what a job does. A
+verdict is `degraded` at worst and blocks nothing.
+
+### `stale_inbox_days`
 
 Default `10`. If no new transcript has been ingested in this long, the digest
 opens with a freshness warning telling you the export may be overdue. Measured
 from the newest `date` in `vault/.vault-meta/ingested.json`, not from file
-mtimes. If nothing has ever been ingested, the banner says that instead.
+mtimes. If nothing has ever been ingested, the banner says that instead. It is
+also the window for the claude.ai export source axis.
 
 This exists because an empty inbox is not self-evidently fine: a quiet digest
 from a system that simply stopped receiving input looks identical to a quiet
@@ -581,6 +724,54 @@ digest from a quiet week.
 **How to choose:** set it slightly longer than your export interval. Weekly
 exports → 10 is right. Monthly exports → 35, or you will get a warning every
 digest and learn to ignore it.
+
+### The other windows
+
+| Key | Default | Meaning |
+|---|---|---|
+| `cc_sessions_quiet_days` | `3` | No Claude Code session ingested for this long marks that source stale |
+| `claude_ai_sync_max_age_hours` | `36` | How old the last ok claude.ai sync may be: one missed day plus slack |
+| `claude_ai_login_warn_days` | `3` | The sync axis goes stale this many days before the claude.ai login expires, so you can renew it while the sync still works |
+| `job_max_age_hours` | `28` | A nightly job's last good run may be this old: one missed night goes stale |
+| `weekly_job_max_age_days` | `8` | Same for weekly jobs (decay) |
+| `extract_lag_days`, `assess_lag_days` | `2`, `2` | A transcript waiting this long for extraction, or for the assessor while a goal is active, is stale |
+| `frontier_map_lag_days` | `3` | A transcript waiting this long to be mapped is stale. The map takes one batch a night, so a long backfill reads stale by design |
+| `frontier_premortem_slack_days` | `3` | An active goal is stale this long past `frontier.premortem_every_days` without a pre-mortem |
+| `run_history_keep` | `200` | Runs kept in `heartbeats.json` |
+
+**How to choose:** the job windows should be your schedule's longest quiet gap
+plus slack, the same reasoning as `health.checked_max_age_hours`. If you only
+run extraction weekly, raise `job_max_age_hours` or every night reads stale.
+
+### The publish keys
+
+`publish_max_age_hours` (default `3`) is how old the last successful Postgres
+publish may be before it reads stale (opt-in; with no publisher configured the
+axis reads `info`). The three timeouts bound a stuck database:
+`publish_timeout_seconds` (connect, `5`), `publish_statement_timeout_seconds`
+(per statement and lock wait, `10`) and `publish_deadline_seconds` (the whole
+publish, after which the process ends, `30`). `reachable_max_age_hours`
+(default `2`) is how old the newest snapshot may be before the display's
+reachability flag turns false, meaning your machine is off or asleep.
+Recreate the view after changing it (`scripts/freshness_publish.py --init`).
+
+---
+
+## `board`
+
+```yaml
+board:
+  publish_deadline_seconds: 30
+  section_max_chars: 20000
+  publish_on_owner_write: true
+```
+
+The board publisher ([board-schema.md](board-schema.md)). Whether it runs at
+all is `DREAMER_PUBLISH_BOARD=1` in `postgres.env`, never this file, so a config
+edit cannot turn publishing on by accident. `publish_deadline_seconds` is the
+hard cap on one publish. `section_max_chars` truncates a longer conclusion
+section and counts it. `publish_on_owner_write` makes the MCP server publish
+right after a status change instead of waiting for the hourly run.
 
 ---
 
@@ -703,6 +894,7 @@ reports drain complete.
 ```yaml
 health:
   checked_max_age_hours: 16
+  detail_max_ids: 8
   embed_pending_max: 50
   index_stale_hours: 30
   untagged_window_days: 14
@@ -722,6 +914,11 @@ Default `16`. How stale the health record may get before the hourly watchdog
 raises a `degraded` event. Set it to the longest quiet gap in your cron
 schedule plus slack — in the stock schedule that gap runs from the 05:00
 night cycle to the 18:30 ingest, so 16 covers it without false alarms.
+
+### `detail_max_ids`
+
+Default `8`. A frontier assertion's one-line detail names at most this many ids
+and counts the rest, so a large backlog does not bury the digest event.
 
 ### `embed_pending_max`
 
@@ -765,7 +962,7 @@ half-planned.
 
 ```yaml
 qmd:
-  collections: [vault, transcripts, conclusions, wisdom]
+  collections: [vault, transcripts, conclusions, wisdom, frontier]
 ```
 
 ### `collections`
@@ -775,6 +972,12 @@ the same list the healthcheck's `collections-covered` and `index-fresh`
 assertions hold that refresh to, so the config, the refresh and the assertion
 cannot drift apart separately. A missing or empty list is loud: reindex logs
 an error and records a `degraded` event rather than silently skipping.
+
+`frontier` is the collection the knowledge frontier searches
+(`vault/frontier`). Register it once in `.qmd/index.yml` (the example file shows
+how) and build it with `qmd update && qmd embed`. Until it is registered, the
+frontier's map and pre-mortem steps defer rather than treat missing retrieval as
+"nothing found".
 
 **How to choose:** leave it matching your qmd setup. Removing `wisdom` does
 not disable the wisdom route — leave the list alone and let an unbuilt corpus
@@ -789,6 +992,8 @@ mcp:
   transport: stdio
   note_max_chars: 500
   max_resurfacings_per_run: 50
+  owner_write_quote_min_chars: 8
+  owner_write_verify_lag_days: 3
 ```
 
 `transport: stdio` documents what the server is: `scripts/dreamer_mcp.py` speaks
@@ -807,6 +1012,187 @@ angle" — never evidence.
 `"resurfacing queue is full; run nightly-extract"` rather than accumulating
 unbounded work for the nightly job. Raise it only if you genuinely log dozens of
 resurfacings between nightly runs.
+
+`owner_write_quote_min_chars` (default `8`) is the shortest `owner_quote` an
+owner-write tool accepts: `commit_goal`, `revise_plan`, `complete_step`,
+`set_status`, `assert_evidence`, `answer_question`, `tap_lesson` and `undo_tap`.
+It is a floor against empty or one-word "quotes", not a check of truth; the
+check of truth is the reconciliation below.
+
+`owner_write_verify_lag_days` (default `3`) is how long a write may wait for its
+quote to appear in an ingested Human turn. Ingestion is not instant (a Claude
+Code session needs its quiet window, a claude.ai chat needs the next sync), so
+the lag must exceed your slowest source. Past it the write is quarantined and
+raised as a question, never reverted.
+
+---
+
+## `locks`
+
+```yaml
+locks:
+  cron_wait_seconds: 120
+```
+
+How long a cron job that finds `wiki.lock` held waits before skipping its run.
+A frontier apply holds the lock for seconds, so a job that starts inside one
+should wait rather than lose its night. A missing key is fatal on purpose: a
+silent fall-back to "do not wait" would bring the lost runs back. Raise it only
+if your jobs routinely start while a long apply runs.
+
+---
+
+## `claude_ai_sync`
+
+```yaml
+claude_ai_sync:
+  python:                       /usr/bin/python3
+  host_name:                    com.dreamer.claude_ai_sync
+  extension_id:                 ""
+  due_hours:                    20
+  retry_after_failure_hours:    3
+  quiet_hours:                  6
+  max_per_run:                  40
+  spacing_seconds:              3
+  page_size:                    50
+  max_pages:                    200
+  max_retries:                  4
+  backoff_base_seconds:         5
+  backoff_max_seconds:          120
+  lock_wait_seconds:            2700
+```
+
+The opt-in claude.ai daily sync ([claude-ai-sync.md](claude-ai-sync.md)). Read
+by the native host, the extension (through the host's status reply), and the
+cron and install scripts. **`extension_id` is the switch.** Empty means the sync
+is not set up and its freshness axes read `info` / `disabled`. Set it to the ID
+Chrome shows for the unpacked extension on `chrome://extensions`, then run
+`bin/install-sync-extension.sh`. Check the terms that apply to your claude.ai
+account first.
+
+| Key | Meaning |
+|---|---|
+| `python`, `host_name` | The interpreter the host runs under (Chrome starts it with no shell environment) and the native-messaging host name |
+| `due_hours` | A run is due when the last ok run is older than this |
+| `retry_after_failure_hours` | After a failed attempt, the hourly tick waits this long before retrying |
+| `quiet_hours` | Chats updated more recently than this are skipped, since they may be in progress; a later run takes them |
+| `max_per_run`, `spacing_seconds` | Chats fetched per run (the rest wait as `pending`) and the minimum gap between chat requests. Together they set how politely the sync behaves; lower the first and raise the second if you see rate limits |
+| `page_size`, `max_pages` | List paging: page size, and a safety bound on how many pages one run reads |
+| `max_retries`, `backoff_base_seconds`, `backoff_max_seconds` | Retry policy for 429 and 5xx, per request |
+| `lock_wait_seconds` | How long `sync-claude-ai.sh` waits for `wiki.lock` (an extraction in progress) before leaving the drops for the next run |
+
+---
+
+## `frontier`
+
+The knowledge frontier has about eighty keys, almost all of them tuned
+constants you should leave alone. This section groups them by purpose and
+explains the ones that decide behaviour. Each key's comment in
+`config.example.yaml` is the authoritative description, and every default below
+is that file's. See
+[architecture.md §16](architecture.md#16-the-knowledge-frontier) for how the
+pieces fit.
+
+### Map and retrieval
+
+| Key | Default | Meaning |
+|---|---|---|
+| `map_batch_chars` | `80000` | Owner text per extraction batch, so one night maps one batch. Raise it to drain a backlog faster; each batch is one model call per step |
+| `prompt_max_chars` | `120000` | Hard cap on any frontier prompt; retrieved neighbours are dropped lowest-ranked first |
+| `match_top_k` | `5` | Neighbours retrieved per concept. Recall-tuned: the judge, not retrieval, decides |
+| `match_chunk_concepts` | `40` | Concepts judged per match call |
+| `max_items_per_transcript` | `8` | Learnable concepts kept per transcript, so a long chat does not flood the map |
+| `parse_retries`, `max_parse_attempts` | `1`, `3` | A malformed reply is retried, then the chat is deferred; after this many deferrals it is skipped with a degraded event |
+| `seed_loop_statuses` | `[open, researching, paused, decision-only]` | Unresolved loops seed a known-unknown item; archived and resolved ones do not |
+| `owner_turn_max_chars`, `passage_window_paragraphs` | `3000`, `1` | A longer owner turn keeps its head and tail and marks the cut, since long turns are mostly pasted material; the paragraphs kept either side of a retrieval hit |
+| `qmd_timeout_seconds`, `qmd_default_limit` | `20`, `10` | Timeout per qmd call, including the first call's model load. Past it the result is "degraded", never "empty". Raise the timeout on a slow machine |
+| `map_ledger_file`, `lock_file`, `vault_lock_wait_seconds`, `cause_min_chars` | see file | Ledger and lock names under `paths.meta`; how long a frontier command waits for `wiki.lock`; the minimum length of a recorded undo cause |
+
+### Gaps: the pre-mortem and the never-discussed check
+
+| Key | Default | Meaning |
+|---|---|---|
+| `premortem_every_days` | `7` | A goal is due when its last pre-mortem is older than this, or its plan changed |
+| `premortem_map_items`, `premortem_max_causes`, `max_candidates_per_cause` | `40`, `6`, `3` | Map items shown to the pre-mortem, failure causes accepted from one reply, and pieces of knowledge per cause |
+| `check_top_k`, `check_title_lex_k` | `8`, `5` | Hits per collection per candidate by meaning, then by the title's words |
+| `check_collections` | `[frontier, transcripts, vault, conclusions]` | Where to look for evidence you already met a candidate |
+| `check_phrase_split_words`, `check_phrase_min_words`, `check_phrase_max_chats` | see file | Also search the title's own phrases in your turns. A keyword search ANDs a whole title, so a chat where you said one half of a compound title in passing would otherwise never be shown |
+| `check_passage_chars`, `check_owner_chars`, `check_owner_paragraphs`, `check_owner_paragraph_chars` | `1500`, `1500`, `3`, `600` | How much text the judge sees. Your own paragraphs get a separate budget so long assistant replies never crowd your words out |
+| `check_owner_min_score`, `check_owner_title_weight`, `check_owner_stem_chars`, `check_owner_min_word_chars`, `check_owner_stopwords` | see file | The word-overlap rule that picks your paragraphs for a candidate. Leave alone unless the check keeps missing obvious matches |
+| `premortems_dir` | `premortems` | Records live under `paths.frontier/<this>/<goal>/<date>.md` |
+
+### Lessons
+
+| Key | Default | Meaning |
+|---|---|---|
+| `research_per_night` | `3` | Lessons researched per night, follow-ups first. This is the research budget; the release ceiling is separate |
+| `max_queries_per_lesson`, `max_fetches_per_lesson` | `3`, `6` | Generic questions written per lesson, and web pages code will fetch. Refused pages count against the cap, and the two-domain rule needs two that load |
+| `lesson_wisdom_hits`, `lesson_wisdom_window_lines`, `lesson_wisdom_window_chars`, `lesson_wisdom_anchor_chars` | `3`, `60`, `6000`, `40` | Library passages per lesson and how much text is read around each hit |
+| `lesson_owner_sources`, `lesson_source_chars`, `lesson_max_claims` | `3`, `12000`, `12` | Earlier owner turns a lesson may cite, characters of each source shown to the claims call, and claims accepted per reply |
+| `lesson_max_revisions` | `2` | Rewrites a rejected lesson gets, each judged afresh. Security rejections are never rewritten |
+| `passage_min_run_tokens`, `passage_max_chars` | `8`, `400` | A quoted passage counts when this many normalised tokens appear as one run in its source; the kept span is cut to this length. Lower the first and a paraphrase could pass |
+| `source_title_max_chars`, `shared_host_suffixes`, `instruction_patterns` | see file | Source labels, hosts where each subdomain is a different owner, and the patterns that mark text as an instruction to a model (rule 10) |
+| `fetch_timeout_seconds`, `fetch_max_bytes`, `fetch_chunk_bytes`, `fetch_max_redirects`, `fetch_user_agent` | `15`, `1500000`, `16384`, `3`, see file | Limits on the code fetcher. Every redirect hop is re-checked |
+| `research_ledger_file`, `pending_dir`, `research_approved_file` | see file | Run state, the holding directory for a lesson that found `wiki.lock` busy, and the approved-queries file for the gated call |
+
+### Ceiling and release
+
+| Key | Default | Meaning |
+|---|---|---|
+| `weekly_ceiling` | `3` | At most this many new lessons are released in any trailing window. Follow-ups are exempt, and a failed lesson frees its slot |
+| `ceiling_window_days` | `7` | The trailing window |
+| `air_deadline_days` | `7` | A released lesson not aired within this long becomes failed |
+| `max_follow_ups_per_item` | `2` | Follow-up lessons one item may hold |
+| `known_push_max` | `200` | Known-known titles sent to the consumer, newest evidence first |
+| `mcp_max_items` | `20` | Items returned per `what_do_i_know` or `get_frontier` call |
+
+**How to choose:** the ceiling is the dial that matters. It is a promise about
+how much the system may ask of your attention, so set it to what you will
+actually read and let a week with fewer be fine. `research_per_night` only
+decides how fast the queue of candidates is worked through.
+
+### The lesson consumer (the show)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `show_url` | `""` | Where lessons go. **Empty means off:** no token is read and no request is made |
+| `allow_insecure_http` | `false` | The URL must be https, and loopback http is also accepted. Any other http needs this |
+| `show_timeout_seconds` | `10` | Per request |
+| `show_env_path` | `~/.config/dreamer/show.env` | Holds `DREAMER_LESSON_TOKEN` as `KEY=VALUE`. The env var `DREAMER_SHOW_ENV` overrides the path |
+| `sync_state_file` | `frontier-sync.json` | Cursor, conflicts and known-list hash, under `paths.meta` |
+
+The HTTP contract the consumer implements is in
+[frontier-schema.md](frontier-schema.md). Dreamer starts every exchange.
+
+### Egress
+
+`frontier.egress` holds the web gate for the one research call
+([architecture.md §17](architecture.md#17-model-call-modes-and-the-egress-gate)).
+
+| Key | Default | Meaning |
+|---|---|---|
+| `dictionary_path` | `/usr/share/dict/words` | Word list for the capitalised-token check. A missing file blocks every capitalised token (fail closed) |
+| `blocked_names_path` | `~/.config/dreamer/egress-blocked.txt` | Your names and third-party names, one per line, matched case-insensitively. A missing, unreadable or empty file blocks every query (fail closed), so create it before the first run |
+| `allowed_proper_nouns` | `[]` | Capitalised terms that name no person or private entity. Add a term only when it is a product, place or field name |
+| `phrase_run_words` | `4` | A run of this many words copied from the goal page or the item's evidence blocks the query |
+| `year_min`, `year_max` | `1900`, `2100` | A 4-digit run counts as a year (allowed) only inside this range |
+| `log_path` | `logs/frontier-egress.jsonl` | Every query, allowed or denied, one JSON line each |
+| `dns_timeout_seconds` | `5` | A DNS lookup for a fetch gives up after this long (fail closed) |
+
+**How to choose:** the two list files are the privacy setting. Put every name you
+would not want in a search engine into `blocked_names_path`, and expect a few
+harmless capitalised words to be dropped until you add them to
+`allowed_proper_nouns`. Dropped is the safe direction: a failing query is never
+rewritten.
+
+### Publish
+
+| Key | Default | Meaning |
+|---|---|---|
+| `publish_lock_wait_seconds` | `5` | How long `frontier_publish.py` waits for `wiki.lock` before skipping this hour silently |
+| `publish_deadline_seconds` | `30` | Hard cap on one publish; the process ends |
+
+Whether it runs at all is `DREAMER_PUBLISH_FRONTIER=1` in `postgres.env`.
 
 ---
 
@@ -854,7 +1240,16 @@ measurements were taken against.
 | The same fold fails night after night | `thread.fold_max_attempts` | Check `fold-quarantine.json` first — a repeat failure is a defect, not a budget problem |
 | Claude Code sessions you expected never appear | `cc_ingest.min_human_turns` / `min_human_chars` | Check the refusal reasons in `cc-ingested.json`, then lower the floor that refused them |
 | Health record goes stale every day at the same time | `health.checked_max_age_hours` | Raise it past your schedule's longest quiet gap |
+| Asked about goals you do not care to track, or never asked about ones you do | `goals.silence_ping_days`, `goals.movement_stale_days` | Raise to ask less often, lower to ask sooner |
+| Asked "what is this for?" about loops that do not matter | `goals.drift_recurrence_min` | Raise it |
+| An owner write was quarantined though you did say it | `mcp.owner_write_verify_lag_days` | Raise it past your slowest ingestion source |
+| A job logs "vault is still locked" and skips | `locks.cron_wait_seconds` | Raise it past the longest apply |
+| Freshness axes stale every morning | `freshness.job_max_age_hours` | Raise it to match your real schedule |
+| Too many lessons, or not enough | `frontier.weekly_ceiling` | Set it to what you will read |
+| Lessons are dropped for no usable source | `frontier.max_fetches_per_lesson`, `frontier.passage_min_run_tokens` | Raise fetches first; lower the run length only knowing a paraphrase could then pass |
+| Every research query is blocked | `frontier.egress.blocked_names_path`, `dictionary_path` | A missing or empty list blocks everything by design; create or fix the file |
+| Frontier map or pre-mortem keeps deferring | `frontier.qmd_timeout_seconds` | Raise it, and confirm the `frontier` collection is registered |
 | Conclusions cite no books at all | not a config problem | `qmd` is not on `PATH` under cron, or `corpora.wisdom_sources` is unbuilt — check `logs/` for the `degraded` event |
 
 For anything that is not a knob, see
-[architecture.md § Where to look when something breaks](architecture.md#11-where-to-look-when-something-breaks).
+[architecture.md § Where to look when something breaks](architecture.md#18-where-to-look-when-something-breaks).

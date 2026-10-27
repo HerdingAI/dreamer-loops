@@ -4,6 +4,7 @@
 **Status:** Specification — approved decisions incorporated; multi-persona review pass applied; ready for handoff to development (Claude Code)
 **Supersedes:** v2.1 (v2.2 records what was actually built, the chassis decision, and the fixes from the §15 implementation audit)
 **Author:** Drafted collaboratively with Claude, August 2026
+**Postdates this spec:** the health spine, the living thread, Claude Code ingestion, owner-authored goals and the nightly assessor (CLAUDE.md rules 15 and 16), the solution spine (rule 5b), job heartbeats and freshness, the opt-in claude.ai daily sync, and the knowledge frontier (rule 17). `CLAUDE.md` and `docs/architecture.md` are current; this document is the design history.
 
 ---
 
