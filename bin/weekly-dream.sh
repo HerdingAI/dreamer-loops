@@ -4,6 +4,7 @@
 # the week (Principle 9 requires checkpointing; v2.0 had none here).
 JOB=weekly-dream
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+arm_heartbeat
 
 # Refresh the index and re-evaluate health BEFORE the leg_blocked gate below,
 # so the gate judges post-refresh state: leg_blocked reads the record the
@@ -41,6 +42,7 @@ if leg_blocked research; then
   "$PY" "$ROOT/scripts/digest.py" build --quiet-reason \
       "Research deferred: healthcheck has blocked the 'research' leg (see the health record in run-state.json)." >/dev/null
   regen_catalog; commit "weekly-dream $(TODAY): research blocked (healthcheck)"
+  mark_skipped
   exit 0
 fi
 

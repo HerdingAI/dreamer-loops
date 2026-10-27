@@ -2,6 +2,7 @@
 # Job 3 — decay-archive (§6.9). Sunday 02:45, BEFORE weekly-dream.
 JOB=decay-archive
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+arm_heartbeat
 acquire_lock
 log "start"
 

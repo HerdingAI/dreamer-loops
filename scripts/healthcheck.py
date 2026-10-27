@@ -55,6 +55,7 @@ from dreamer_common import (CFG, as_date, atomic_write_json, hours_since,  # noq
 import goals as G  # noqa: E402
 import questions as Q  # noqa: E402
 import vault as V  # noqa: E402
+import freshness as FR  # noqa: E402
 
 SEVERITIES = ("info", "degraded", "blocking")
 
@@ -730,6 +731,54 @@ def assert_no_numeric_progress():
     return True, "no numeric progress keys in goal pages"
 
 
+# --------------------------------------------------------------------------
+# Freshness (see docs/freshness-schema.md).
+# Verdicts are computed once per run by scripts/freshness.py and read here —
+# the healthcheck judges nothing itself and, as ever, writes nothing. All
+# three are `degraded` and block no leg: blocking a leg because the system is
+# stale would make it staler.
+
+_FRESH_JOBS_SKIP = ("job.healthcheck",)            # the watchdog owns it
+_FRESH_CONVERGED = ("converge.extraction", "converge.assessment")
+# converge.folds and converge.search-index are already asserted by
+# fold-queue-current and index-fresh.
+
+
+def _freshness() -> dict:
+    if "freshness" not in _STATE_CACHE:
+        _STATE_CACHE["freshness"] = FR.collect()
+    return _STATE_CACHE["freshness"]
+
+
+def _freshness_verdict(select, what: str):
+    axes = [a for a in _freshness()["axes"] if select(a)]
+    bad = [a for a in axes if a["status"] in FR.FAILING]
+    if bad:
+        # Axis id and verdict only — no age. write_health dedups events on
+        # the exact detail string, and an age that changes every run would
+        # stack one digest line per healthcheck. The reason is on the
+        # dashboard and in `freshness.py --json`.
+        return False, "; ".join(f"{a['axis']} {a['status']}" for a in bad)
+    return True, f"{len(axes)} {what} within window"
+
+
+def assert_freshness_jobs():
+    return _freshness_verdict(
+        lambda a: a["kind"] == "job" and a["axis"] not in _FRESH_JOBS_SKIP,
+        "job axis(es)")
+
+
+def assert_freshness_sources():
+    return _freshness_verdict(
+        lambda a: a["kind"] == "source" and a["status"] != "info",
+        "source axis(es)")
+
+
+def assert_freshness_converged():
+    return _freshness_verdict(lambda a: a["axis"] in _FRESH_CONVERGED,
+                              "convergence axis(es)")
+
+
 register("embeddings-current", "degraded", (), assert_embeddings_current)
 register("index-fresh", "blocking", ("research",), assert_index_fresh)
 register("collections-covered", "degraded", (), assert_collections_covered)
@@ -748,6 +797,9 @@ register("owner-writes-verified", "degraded", (), assert_owner_writes_verified)
 register("open-questions-drained", "degraded", (), assert_open_questions_drained)
 register("assessment-queue-depth", "degraded", (), assert_assessment_queue_depth)
 register("no-numeric-progress", "info", (), assert_no_numeric_progress)
+register("freshness-jobs", "degraded", (), assert_freshness_jobs)
+register("freshness-sources", "degraded", (), assert_freshness_sources)
+register("freshness-converged", "degraded", (), assert_freshness_converged)
 
 
 # --------------------------------------------------------------------------

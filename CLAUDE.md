@@ -309,6 +309,15 @@ in `health.blocked_legs` of `run-state.json`, which jobs consult via
 `leg_blocked`). A blocked leg exits cleanly with its reason evented — a
 blocked night must read as legibly as a quiet one.
 
+Freshness is part of the spine. `scripts/freshness.py` computes, for every
+axis, when it last ran, last produced and last received input, from job
+heartbeats (`vault/.vault-meta/heartbeats.json`, written by the job wrapper's
+exit trap) and the existing ledgers. The healthcheck reads those verdicts; it
+never computes or writes one. Freshness assertions are always `degraded` and
+block no leg — blocking a leg because the system is stale makes it staler.
+"Produced nothing" is never stale on its own: a quiet night is legitimate
+(rule 2). Thresholds live under `freshness:` in `config.yaml`.
+
 One-time initialization carve-out: the thread and tag backfills
 (`bin/thread-backfill.sh`, `bin/tag-backfill.sh`) may touch `paused` and
 `decision-only` pages once, at feature initialization — without it the
