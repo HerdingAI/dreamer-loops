@@ -1,0 +1,25 @@
+{
+  "id": "tactical-a",
+  "kind": "tactical",
+  "call": "consequence",
+  "source": "synthetic",
+  "candidate": {
+    "title": "Where to buy a bag of clay",
+    "summary": "Which local shop sells stoneware clay by the bag."
+  },
+  "goal": {
+    "id": "G9001",
+    "title": "Fire a set of glazed pottery mugs",
+    "finish_line": "Four mugs come out of the kiln with an even glaze.",
+    "why": "A hobby the owner wants to finish properly.",
+    "plan": [
+      "Wedge and throw four mugs",
+      "Bisque fire",
+      "Glaze and fire again"
+    ]
+  },
+  "cause": "The mugs never get thrown because no clay is on hand.",
+  "expect": {
+    "verdict": "tactical"
+  }
+}

@@ -20,7 +20,7 @@ error string as detail, and never suppresses the assertions after it. The
 exit code is 0 unless the health WRITE itself failed; callers treat non-zero
 as degraded, never as a reason to abort the cycle.
 
-The U3 launch set (registered at the bottom of this file): embeddings-current,
+The launch set (registered at the bottom of this file): embeddings-current,
 index-fresh, collections-covered, vocabulary-applied, cost-records-sane,
 gates-current — plus fold-queue-current (rule-15 fold-queue hygiene, the R24
 growth discipline). Every assertion is a pure function over readable state — no LLM
@@ -56,6 +56,10 @@ import goals as G  # noqa: E402
 import questions as Q  # noqa: E402
 import vault as V  # noqa: E402
 import freshness as FR  # noqa: E402
+import frontier as FRN  # noqa: E402
+import frontier_gaps as FRG  # noqa: E402
+import frontier_lessons as FRL  # noqa: E402
+import frontier_map as FRM  # noqa: E402
 import spine as SP  # noqa: E402
 
 SEVERITIES = ("info", "degraded", "blocking")
@@ -263,7 +267,7 @@ def watchdog() -> int:
 
 
 # --------------------------------------------------------------------------
-# U3 — qmd status (read-only) and its parsers
+# qmd status (read-only) and its parsers
 # --------------------------------------------------------------------------
 # The parsers are pure functions over the command's text so tests can feed
 # them captured output. NEVER judge index freshness from the index file's
@@ -378,7 +382,7 @@ def parse_collection_ages(text: str) -> dict[str, float]:
 
 
 # --------------------------------------------------------------------------
-# U3 — the launch assertions (pure reads; the spine observes, never mutates)
+# The launch assertions (pure reads; the spine observes, never mutates)
 # --------------------------------------------------------------------------
 
 def assert_embeddings_current():
@@ -413,19 +417,21 @@ def assert_index_fresh():
         ages = parse_collection_ages(qmd_status_text())
     except (RuntimeError, ValueError) as exc:
         return False, str(exc)
+    # qmd's per-collection age tracks content CHANGE, not last scan (a static
+    # corpus can sit at 'updated 14d ago' while being rescanned nightly). A collection
+    # is fresh if qmd's age is inside the window OR a recent successful reindex covered it.
+    rescued = _recently_reindexed(window)
     # A configured collection qmd stops reporting must not silently drop out
-    # of the staleness check — absence of evidence of freshness blocks.
+    # of the staleness check — absence of evidence of freshness blocks. An
+    # empty collection ("Files: 0 (updated never)") has no age either; a
+    # recent successful scan of it is that evidence. A collection qmd does not
+    # know fails its `qmd update -c`, so reindex never records it as scanned.
     want = list((CFG.get("qmd") or {}).get("collections") or [])
-    missing = [c for c in want if c not in ages]
+    missing = [c for c in want if c not in ages and c not in rescued]
     if missing:
         return False, (f"qmd status reports no age for configured "
                        f"collection(s): {', '.join(missing)} — cannot judge "
                        f"freshness")
-    # qmd's per-collection age tracks content CHANGE, not last scan (observed
-    # live: the static wisdom corpus sits at "updated 14d ago" while being
-    # rescanned nightly). A collection is fresh if qmd's age is inside the
-    # window OR a recent successful reindex covered it.
-    rescued = _recently_reindexed(window)
     stale = {name: h for name, h in ages.items()
              if h > window and name not in rescued}
     if stale:
@@ -740,7 +746,8 @@ def assert_no_numeric_progress():
 # stale would make it staler.
 
 _FRESH_JOBS_SKIP = ("job.healthcheck",)            # the watchdog owns it
-_FRESH_CONVERGED = ("converge.extraction", "converge.assessment")
+_FRESH_CONVERGED = ("converge.extraction", "converge.assessment",
+                    "converge.frontier-map", "converge.premortem")
 # converge.folds and converge.search-index are already asserted by
 # fold-queue-current and index-fresh.
 
@@ -808,6 +815,124 @@ def assert_spine_complete():
     return True, f"{seen} spine conclusion(s) complete"
 
 
+# --------------------------------------------------------------------------
+# Knowledge frontier. Mechanical comparisons of pages already on disk: no
+# model call, no write. All `degraded`, none blocking: the release step (frontier_sync)
+# refuses a lesson that fails integrity whatever these say. An absent frontier passes
+# (nothing built yet); each assertion is proved against a seeded defect in the tests.
+
+def _ids(found: Iterable[str]) -> str:
+    """Names at most health.detail_max_ids ids and counts the rest, so a detail stays one line."""
+    shown = int(CFG["health"]["detail_max_ids"])
+    found = sorted(found)
+    head = ", ".join(found[:shown])
+    return head + (f" (+{len(found) - shown} more)" if len(found) > shown else "")
+
+
+def _frontier_items() -> list:
+    d = FRN.items_dir()
+    return [FRN.Item.from_path(f) for f in sorted(d.glob("K*.md"))] if d.exists() else []
+
+
+def _frontier_lessons() -> list:
+    d = FRN.lessons_dir()
+    return [FRN.Lesson.from_path(f) for f in sorted(d.glob("K*.md"))] if d.exists() else []
+
+
+def assert_frontier_released_integrity():
+    lessons = [l for l in _frontier_lessons() if l.status in FRN.DELIVERED_STATUSES]
+    bad = {l.id: FRL.lesson_integrity(l) for l in lessons}
+    bad = {k: v for k, v in bad.items() if v}
+    if bad:
+        first = next(iter(sorted(bad)))
+        return False, f"{len(bad)} released lesson(s) fail integrity: {_ids(bad)} ({bad[first][0]})"
+    return True, f"{len(lessons)} released lesson(s) passed their check and cite listed sources"
+
+
+def assert_frontier_quadrant_consistent():
+    active = FRN.active_goal_ids()
+    items = _frontier_items()
+    by_item: dict[str, list] = {}
+    for les in _frontier_lessons():
+        by_item.setdefault(les.item, []).append(les)
+    bad = []
+    for it in items:
+        lessons = [l for l in by_item.get(it.id, []) if l.id in set(it.lessons)]
+        # Accepted when the stored quadrant is what the item's goals made it, whether or not a
+        # goal has been paused since: placement is re-derived on the item's next write, and a
+        # pause alone is not a defect.
+        related = {g["goal"] for g in it.goals}
+        if it.quadrant not in (FRN.derive_quadrant(it, active, lessons),
+                               FRN.derive_quadrant(it, related, lessons)):
+            bad.append(it.id)
+    if bad:
+        return False, f"{len(bad)} item(s) sit in a quadrant their evidence does not give: {_ids(bad)}"
+    return True, f"{len(items)} item(s) in the quadrant their evidence and taps give"
+
+
+def assert_frontier_uu_no_owner_evidence():
+    # An item an aired lesson pinned keeps the quadrant the owner was told it was in
+    # even if the owner's words arrived afterwards, so it is not a defect.
+    pinned = {l.item for l in _frontier_lessons() if l.aired_on and l.aired_quadrant}
+    bad = [it.id for it in _frontier_items() if it.quadrant == "unknown_unknown" and it.id not in pinned
+           and any(e["kind"] != "exposure" for e in it.evidence)]
+    if bad:
+        return False, f"{len(bad)} unknown unknown item(s) hold owner evidence: {_ids(bad)}"
+    return True, "no unknown unknown item holds owner evidence"
+
+
+def assert_frontier_ceiling():
+    """No trailing ceiling_window_days window holds more than weekly_ceiling NEW lessons
+    released. Follow-ups are exempt; a failed lesson frees its slot. Counts the
+    same lessons frontier_sync._plan does, so the two cannot disagree about the window."""
+    ceiling = int(FRN._cfg("weekly_ceiling"))
+    window = float(FRN._cfg("ceiling_window_days")) * 86400.0
+    stamps, unreadable = [], []
+    for les in _frontier_lessons():
+        if les.kind != "new" or les.status == "failed" or not les.released_at:
+            continue
+        key = FRN._at_key(les.released_at)
+        if key[0] != 0:
+            unreadable.append(les.id)
+        else:
+            stamps.append((key[1], les.id))
+    stamps.sort()
+    over = []
+    for i in range(len(stamps) - ceiling):
+        if stamps[i + ceiling][0] - stamps[i][0] <= window:
+            over.append(stamps[i][1])
+    issues = []
+    if over:
+        issues.append(f"more than {ceiling} new lessons released within {FRN._cfg('ceiling_window_days'):g} days "
+                      f"from {_ids(over)}")
+    if unreadable:
+        issues.append(f"unreadable released_at on {_ids(unreadable)}")
+    if issues:
+        return False, "; ".join(issues)
+    return True, f"at most {ceiling} new lessons released in any {FRN._cfg('ceiling_window_days'):g}-day window"
+
+
+def assert_frontier_stuck_items():
+    """Work that reached frontier.max_parse_attempts and was given up: a chat the map
+    skipped, a lesson key the researcher skipped, a lesson at the limit, a pre-mortem
+    candidate that ran out of attempts. Each is a defect to look at, not work to retry."""
+    limit = int(FRN._cfg("max_parse_attempts"))
+    stuck = []
+    stuck += [f"map:{k}" for k in FRM.load_ledger()["skipped"]]
+    stuck += [f"lesson-run:{k}" for k in FRL.load_ledger()["skipped"]]
+    stuck += [f"lesson:{l.id}" for l in _frontier_lessons() if l.parse_attempts >= limit]
+    base = FRN.frontier_dir() / FRN._cfg("premortems_dir")
+    for gdir in sorted(base.iterdir()) if base.exists() else []:
+        rec = FRG.latest_record(gdir.name) if gdir.is_dir() else None
+        for c in (rec or {}).get("candidates", []):
+            if c.get("status") != "done" and int(c.get("attempts") or 0) >= limit:
+                stuck.append(f"premortem:{gdir.name}")
+                break
+    if stuck:
+        return False, f"{len(stuck)} stuck at {limit} attempts: {_ids(stuck)}"
+    return True, f"nothing at {limit} attempts"
+
+
 register("embeddings-current", "degraded", (), assert_embeddings_current)
 register("index-fresh", "blocking", ("research",), assert_index_fresh)
 register("collections-covered", "degraded", (), assert_collections_covered)
@@ -830,6 +955,11 @@ register("freshness-jobs", "degraded", (), assert_freshness_jobs)
 register("freshness-sources", "degraded", (), assert_freshness_sources)
 register("freshness-converged", "degraded", (), assert_freshness_converged)
 register("spine-complete", "degraded", (), assert_spine_complete)
+register("frontier-released-integrity", "degraded", (), assert_frontier_released_integrity)
+register("frontier-quadrant-consistent", "degraded", (), assert_frontier_quadrant_consistent)
+register("frontier-uu-no-owner-evidence", "degraded", (), assert_frontier_uu_no_owner_evidence)
+register("frontier-ceiling", "degraded", (), assert_frontier_ceiling)
+register("frontier-stuck-items", "degraded", (), assert_frontier_stuck_items)
 
 
 # --------------------------------------------------------------------------

@@ -22,7 +22,8 @@ import dreamer_common as dc  # noqa: E402
 import freshness as F  # noqa: E402
 
 NOW = _dt.datetime(2026, 10, 3, 12, 0, 0)
-NIGHTLY = ("sync-claude-ai", "ingest-cc", "nightly-extract", "nightly-assess", "night-cycle", "weekly-dream")
+NIGHTLY = ("sync-claude-ai", "ingest-cc", "nightly-extract", "nightly-assess", "night-cycle", "weekly-dream",
+           "frontier")
 
 
 def ago(hours: float) -> str:
@@ -39,7 +40,7 @@ class FreshCase(unittest.TestCase):
             "root": self.tmp, "vault": vault, "meta": vault / ".vault-meta",
             "sources": vault / "sources" / "transcripts", "loops": vault / "loops",
             "goals": vault / "goals", "conclusions": vault / "conclusions",
-            "digests": vault / "digests", "archive": vault / "archive",
+            "digests": vault / "digests", "archive": vault / "archive", "frontier": vault / "frontier",
             "logs": self.tmp / "logs",
         }
         for d in paths.values():
@@ -132,7 +133,8 @@ class ShapeTest(FreshCase):
                 "job.night-cycle", "job.weekly-dream", "job.decay-archive", "job.healthcheck",
                 "converge.extraction", "converge.assessment", "converge.folds",
                 "converge.search-index", "output.conclusion", "output.digest",
-                "publish.postgres", "publish.board"}
+                "publish.postgres", "publish.board", "job.frontier", "converge.frontier-map",
+                "converge.premortem", "publish.frontier", "publish.lesson-sync"}
         self.assertEqual({a["axis"] for a in snap["axes"]}, want)
         keys = {"axis", "kind", "label", "status", "last_ran", "last_produced",
                 "last_arrival", "last_outcome", "threshold_hours", "backlog", "reason"}
@@ -326,6 +328,163 @@ class BoardPublishAxisTest(FreshCase):
         self.assertEqual(F.collect(NOW)["overall"], "ok")
 
 
+class FrontierAxesTest(FreshCase):
+    """The knowledge-frontier axes. Each reads ok when fresh and stale when old."""
+
+    def heartbeats(self) -> dict:
+        return json.loads((self.meta / "heartbeats.json").read_text(encoding="utf-8"))
+
+    def goal(self, gid: str = "G0001", status: str = "active", created: str = "2026-10-02") -> None:
+        d = Path(dc.CFG["paths"]["goals"])
+        (d / f"{gid}.md").write_text(
+            f"---\ntype: goal\nid: {gid}\nstatus: {status}\ntitle: Goal {gid}\ncreated: {created}\n"
+            f"plan_revision: 1\ntarget_date: 2027-06-30\nfinish_line: Done.\nwhy: Because.\n---\n\n# g\n\n"
+            f"## Plan (revision 1)\n\n- [ ] Step\n", encoding="utf-8")
+
+    def premortem(self, gid: str, days_ago: float) -> None:
+        import frontier_gaps as FG
+        date = (NOW - _dt.timedelta(days=days_ago)).date().isoformat()
+        FG.write_record(gid, {"date": date, "plan_revision": 1, "causes": [], "candidates": []})
+
+    def map_ledger(self, done: list[Path]) -> None:
+        import make_batch as MB
+        self.write(dc.CFG["frontier"]["map_ledger_file"],
+                   {"version": 1, "done": {MB.rel_of(f): {"message_count": 1, "turns": 1} for f in done},
+                    "deferred": {}, "skipped": {}})
+
+    # -- job.frontier --------------------------------------------------------
+    def test_job_frontier_is_ok_when_it_ran_last_night(self) -> None:
+        self.assertEqual(self.axis("job.frontier")["status"], "ok")
+
+    def test_job_frontier_is_stale_after_a_missed_night(self) -> None:
+        self.set_job("frontier", ok_hours_ago=40)
+        self.assertEqual(self.axis("job.frontier")["status"], "stale")
+
+    def test_job_frontier_is_stale_when_its_last_run_failed(self) -> None:
+        self.set_job("frontier", ok_hours_ago=1, outcome="failed")
+        self.assertEqual(self.axis("job.frontier")["status"], "stale")
+
+    # -- converge.frontier-map ----------------------------------------------
+    def test_map_backlog_is_info_before_the_map_exists(self) -> None:
+        self.transcript("2026-09-01--a.md", waiting_hours=24 * 30)
+        a = self.axis("converge.frontier-map")          # no ledger: the backfill has not begun
+        self.assertEqual(a["status"], "info")
+
+    def test_map_backlog_is_ok_when_everything_is_mapped(self) -> None:
+        f = self.transcript("2026-10-01--a.md", waiting_hours=24 * 20)
+        self.map_ledger([f])
+        a = self.axis("converge.frontier-map")
+        self.assertEqual((a["status"], a["backlog"]), ("ok", 0))
+
+    def test_map_backlog_is_ok_for_a_recent_unmapped_transcript(self) -> None:
+        f = self.transcript("2026-10-01--a.md", waiting_hours=24 * 20)
+        self.map_ledger([f])
+        self.transcript("2026-10-03--b.md", waiting_hours=12)
+        a = self.axis("converge.frontier-map")
+        self.assertEqual((a["status"], a["backlog"]), ("ok", 1))
+
+    def test_map_backlog_is_stale_when_a_transcript_waits_too_long(self) -> None:
+        f = self.transcript("2026-10-01--a.md", waiting_hours=24 * 20)
+        self.map_ledger([f])
+        self.transcript("2026-09-28--b.md", waiting_hours=24 * 5)
+        a = self.axis("converge.frontier-map")
+        self.assertEqual((a["status"], a["backlog"]), ("stale", 1))
+
+    def test_a_transcript_the_map_gave_up_on_is_not_backlog(self) -> None:
+        import make_batch as MB
+        f = self.transcript("2026-09-28--b.md", waiting_hours=24 * 5)
+        self.write(dc.CFG["frontier"]["map_ledger_file"],
+                   {"version": 1, "done": {}, "deferred": {},
+                    "skipped": {MB.rel_of(f): {"reason": "parse", "attempts": 3}}})
+        self.assertEqual(self.axis("converge.frontier-map")["status"], "ok")
+
+    def test_a_chat_that_grew_since_it_was_mapped_is_backlog_again(self) -> None:
+        f = self.transcript("2026-09-28--b.md", waiting_hours=24 * 5)
+        f.write_text("---\nmessage_count: 9\n---\n\n**Human:** hello\n", encoding="utf-8")
+        ts = (NOW - _dt.timedelta(hours=24 * 5)).timestamp()
+        os.utime(f, (ts, ts))
+        self.map_ledger([f])                      # mapped at message_count 1
+        a = self.axis("converge.frontier-map")
+        self.assertEqual((a["status"], a["backlog"]), ("stale", 1))
+
+    # -- converge.premortem --------------------------------------------------
+    def test_premortem_is_ok_without_an_active_goal(self) -> None:
+        self.goal(status="paused", created="2026-01-01")
+        a = self.axis("converge.premortem")
+        self.assertEqual((a["status"], a["backlog"]), ("ok", 0))
+
+    def test_premortem_is_ok_inside_the_window(self) -> None:
+        self.goal(created="2026-08-01")
+        self.premortem("G0001", days_ago=6)
+        self.assertEqual(self.axis("converge.premortem")["status"], "ok")
+
+    def test_premortem_is_ok_inside_the_slack(self) -> None:
+        self.goal(created="2026-08-01")
+        self.premortem("G0001", days_ago=9)           # due (7d) but inside window + slack (10d)
+        self.assertEqual(self.axis("converge.premortem")["status"], "ok")
+
+    def test_premortem_is_stale_past_window_plus_slack(self) -> None:
+        self.goal(created="2026-08-01")
+        self.premortem("G0001", days_ago=12)
+        a = self.axis("converge.premortem")
+        self.assertEqual((a["status"], a["backlog"]), ("stale", 1))
+
+    def test_a_goal_that_never_had_a_premortem_goes_stale_from_its_creation(self) -> None:
+        self.goal(created="2026-09-01")
+        self.assertEqual(self.axis("converge.premortem")["status"], "stale")
+        self.goal(created="2026-10-02")
+        self.assertEqual(self.axis("converge.premortem")["status"], "ok")
+
+    def test_only_the_neglected_goal_is_stale(self) -> None:
+        self.goal("G0001", created="2026-08-01"); self.premortem("G0001", days_ago=2)
+        self.goal("G0002", created="2026-08-01"); self.premortem("G0002", days_ago=30)
+        a = self.axis("converge.premortem")
+        self.assertEqual((a["status"], a["backlog"]), ("stale", 1))
+
+    # -- publish.frontier ----------------------------------------------------
+    def test_publish_frontier_is_off_when_disabled(self) -> None:
+        a = self.axis("publish.frontier")
+        self.assertEqual((a["status"], a["reason"]), ("info", "disabled"))
+        data = self.heartbeats(); data["publish_frontier"] = {"configured": False}
+        self.write("heartbeats.json", data)
+        self.assertEqual(self.axis("publish.frontier")["status"], "info")
+
+    def test_publish_frontier_is_ok_when_recent_and_stale_when_old(self) -> None:
+        data = self.heartbeats(); data["publish_frontier"] = {"configured": True, "last_ok": ago(1)}
+        self.write("heartbeats.json", data)
+        self.assertEqual(self.axis("publish.frontier")["status"], "ok")
+        data["publish_frontier"] = {"configured": True, "last_ok": ago(5)}
+        self.write("heartbeats.json", data)
+        self.assertEqual(self.axis("publish.frontier")["status"], "stale")
+
+    # -- publish.lesson-sync ------------------------------------------------
+    def test_lesson_sync_is_info_disabled_while_the_show_url_is_empty(self) -> None:
+        self.assertEqual(dc.CFG["frontier"]["show_url"], "")
+        a = self.axis("publish.lesson-sync")
+        self.assertEqual((a["status"], a["reason"]), ("info", "disabled"))
+        # state on disk does not matter while the feature is off
+        self.write(dc.CFG["frontier"]["sync_state_file"], {"last_push_at": ago(500)})
+        self.assertEqual(self.axis("publish.lesson-sync")["status"], "info")
+
+    def test_lesson_sync_is_judged_once_the_show_url_is_set(self) -> None:
+        orig = dc.CFG["frontier"]["show_url"]
+        self.addCleanup(dc.CFG["frontier"].__setitem__, "show_url", orig)
+        dc.CFG["frontier"]["show_url"] = "https://show.example.org"
+        self.assertEqual(self.axis("publish.lesson-sync")["status"], "never")
+        self.write(dc.CFG["frontier"]["sync_state_file"], {"last_pull_at": ago(2), "last_push_at": ago(2)})
+        self.assertEqual(self.axis("publish.lesson-sync")["status"], "ok")
+        self.write(dc.CFG["frontier"]["sync_state_file"], {"last_pull_at": ago(60), "last_push_at": ago(60)})
+        self.assertEqual(self.axis("publish.lesson-sync")["status"], "stale")
+
+    def test_the_postgres_axis_ignores_the_frontier_record(self) -> None:
+        data = self.heartbeats(); data["publish_frontier"] = {"configured": True, "last_ok": ago(1)}
+        self.write("heartbeats.json", data)
+        self.assertEqual(self.axis("publish.postgres")["status"], "info")
+
+    def test_a_disabled_frontier_and_no_map_leave_the_vault_ok(self) -> None:
+        self.assertEqual(F.collect(NOW)["overall"], "ok")
+
+
 import healthcheck as H  # noqa: E402
 
 
@@ -364,6 +523,24 @@ class AssertionTest(FreshCase):
         ok, detail = H.assert_freshness_converged()
         self.assertFalse(ok)
         self.assertIn("converge.extraction", detail)
+
+    def test_a_stalled_frontier_fails_jobs_and_converged_but_blocks_nothing(self) -> None:
+        self.set_job("frontier", ok_hours_ago=40)
+        ok, detail = H.assert_freshness_jobs()
+        self.assertFalse(ok)
+        self.assertIn("job.frontier", detail)
+        H._STATE_CACHE.clear()
+        # a goal never given a pre-mortem since it was created long ago
+        d = Path(dc.CFG["paths"]["goals"])
+        (d / "G0001.md").write_text(
+            "---\ntype: goal\nid: G0001\nstatus: active\ntitle: g\ncreated: 2026-08-01\n"
+            "plan_revision: 1\ntarget_date: 2027-06-30\nfinish_line: Done.\nwhy: Because.\n---\n\n# g\n\n"
+            "## Plan (revision 1)\n\n- [ ] Step\n", encoding="utf-8")
+        ok, detail = H.assert_freshness_converged()
+        self.assertFalse(ok)
+        self.assertIn("converge.premortem", detail)
+        sev = {n: (s_, b) for n, s_, b, _ in H.ASSERTIONS}
+        self.assertEqual(sev["freshness-converged"], ("degraded", ()))
 
     def test_the_healthcheck_axis_is_not_asserted_by_jobs(self) -> None:
         # The watchdog owns it; asserting it here would have the healthcheck

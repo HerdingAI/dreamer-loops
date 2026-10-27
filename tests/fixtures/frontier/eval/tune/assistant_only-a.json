@@ -1,0 +1,20 @@
+{
+  "id": "assistant_only-a",
+  "kind": "assistant_only",
+  "call": "check",
+  "source": "synthetic",
+  "candidate": {
+    "title": "Glaze shrinkage and crawling",
+    "summary": "Why thick glaze pulls back from the clay in the kiln."
+  },
+  "expect": {
+    "owner_discussed_in": [
+      "none"
+    ],
+    "exposed": true
+  },
+  "fixture": {
+    "hit_line_contains": "crawling happens when",
+    "transcript": "# Kiln questions\n\n## Human\n\nI want to start on pottery mugs this month. What should I read first?\n\n## Assistant\n\nStart with a wedging guide. Glaze crawling happens when a thick coat pulls back from the clay as it dries and fires.\n"
+  }
+}

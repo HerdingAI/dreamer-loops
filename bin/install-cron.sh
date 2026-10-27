@@ -40,7 +40,11 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${NODE_BIN:+:$N
 # drift is measured in loops, so the assessor must see tonight's extraction,
 # and a fixed offset would silently lose that order the night extraction runs
 # long. The assessor runs whether or not extraction succeeded.
-0 19 * * *  flock -n /tmp/dreamer-nightly.lock $ROOT/bin/nightly-extract.sh >> $ROOT/logs/nightly.log 2>&1; flock -n /tmp/dreamer-assess.lock $ROOT/bin/nightly-assess.sh >> $ROOT/logs/assess.log 2>&1
+# The knowledge-frontier pass (taps, map, pre-mortems, lessons, release) is
+# chained after the assessor the same way, with a semicolon: it reads what extraction and
+# assessment just wrote, and it runs whether or not either of them succeeded. It
+# holds its own frontier.lock for the run and takes wiki.lock only around each apply.
+0 19 * * *  flock -n /tmp/dreamer-nightly.lock $ROOT/bin/nightly-extract.sh >> $ROOT/logs/nightly.log 2>&1; flock -n /tmp/dreamer-assess.lock $ROOT/bin/nightly-assess.sh >> $ROOT/logs/assess.log 2>&1; flock -n /tmp/dreamer-frontier.lock $ROOT/bin/frontier.sh >> $ROOT/logs/frontier.log 2>&1
 
 # Decay stays weekly and must precede the dream (spec §6.9 orders Job 3 before
 # Job 2). With dreams running all night, "before" now means before the window
@@ -65,7 +69,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${NODE_BIN:+:$N
 # a reader tell "laptop off" (snapshot old) from "axis stale" (snapshot fresh).
 # The board publish (content, opt-in; a no-op unless enabled) runs between them
 # so the health snapshot that follows reports it.
-12 * * * * $ROOT/scripts/healthcheck.py --watchdog >> $ROOT/logs/watchdog.log 2>&1; $ROOT/scripts/board_publish.py >> $ROOT/logs/board-publish.log 2>&1; $ROOT/scripts/freshness_publish.py >> $ROOT/logs/freshness-publish.log 2>&1
+12 * * * * $ROOT/scripts/healthcheck.py --watchdog >> $ROOT/logs/watchdog.log 2>&1; $ROOT/scripts/board_publish.py >> $ROOT/logs/board-publish.log 2>&1; $ROOT/scripts/freshness_publish.py >> $ROOT/logs/freshness-publish.log 2>&1; $ROOT/scripts/frontier_publish.py >> $ROOT/logs/frontier-publish.log 2>&1
 # --- end dreamer ---
 EOF
 
