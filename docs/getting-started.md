@@ -197,12 +197,14 @@ decay:
 ./bin/install-cron.sh
 ```
 
-That installs the whole schedule: the Claude Code session sweep
-(`ingest-cc.sh`, 18:30), the nightly extraction (19:00), the weekly decay
+That installs the whole schedule: the claude.ai sync conversion
+(`sync-claude-ai.sh`, 18:00, inert until you enable the sync), the Claude Code
+and desktop session sweep (`ingest-cc.sh`, 18:30), the nightly extraction
+(19:00) with the goal assessor and the frontier pass chained after it, the weekly decay
 pass (Sunday 19:30), the night cycle (backfill leg then dream leg at 20:00 /
 23:00 / 02:00 / 05:00, with a health check at the top of each cycle and again
 before the dream leg), a weekly dashboard backstop (Sunday 06:00), and the
-hourly health watchdog (:12). Every job takes an advisory lock, so an overrun
+hourly health watchdog (:12), followed by the opt-in publishers. Every job takes an advisory lock, so an overrun
 never collides with its successor, and a failed blocking health assertion
 stops only the leg it names — with the reason in the digest.
 
@@ -228,7 +230,42 @@ afterwards — they are the only paths allowed to touch `paused` and
 
 ---
 
-## 9. Optional: query the vault from a chat client
+## 9. Optional next steps
+
+Everything below is off or inert until you do it. None is needed for loops and
+conclusions.
+
+- **Commit a first goal.** With the MCP server connected (next section), tell
+  your assistant a goal in conversation. Agree what "done" looks like, why it
+  matters and a plan, then say clearly to commit it. The assistant records it
+  with `commit_goal`, quoting your words. From then on the 19:00 assessor attaches
+  conversations to it and asks when it goes quiet. See
+  [rule 16](the-rules.md#rule-16--owner-writes-the-worried-friend).
+- **Register the frontier collection.** The knowledge frontier needs its own qmd
+  collection. Add `frontier` to `.qmd/index.yml` (`.qmd/index.yml.example` shows
+  how), run `qmd update && qmd embed`, then map your existing conversations once
+  with `./bin/frontier-backfill.sh`. Before the first research run, create the
+  file named by `frontier.egress.blocked_names_path` with the names you never
+  want in a search query; until it exists every query is blocked by design. To
+  receive lessons, point `frontier.show_url` at a consumer that follows
+  [docs/frontier-schema.md](frontier-schema.md). Leave it empty to keep the
+  map only.
+- **Sync claude.ai daily.** An optional browser extension copies your own chats
+  in each day instead of waiting for a manual export. It uses the website's own
+  endpoints, not a documented API, so check the terms that apply to your account
+  before enabling it. Setup, permissions and limits:
+  [docs/claude-ai-sync.md](claude-ai-sync.md).
+- **Publish to a display.** The freshness, board and frontier publishers write to
+  a Postgres database you control and do nothing until you create
+  `~/.config/dreamer/postgres.env`. Run `bin/freshness-setup.sh` once, and set
+  `DREAMER_PUBLISH_BOARD=1` or `DREAMER_PUBLISH_FRONTIER=1` in that file to
+  publish content as well as metadata. Contracts:
+  [freshness](freshness-schema.md), [board](board-schema.md),
+  [frontier](frontier-schema.md).
+
+---
+
+## 10. Optional: query the vault from a chat client
 
 Set up the MCP server and your assistant can search your loops and conclusions
 mid-conversation, and log when a topic resurfaces live. See

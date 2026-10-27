@@ -1,6 +1,6 @@
 # The rules, and why they exist
 
-`CLAUDE.md` is Dreamer's constitution: fifteen numbered rules that fully
+`CLAUDE.md` is Dreamer's constitution: seventeen numbered rules that fully
 specify how the reasoning engine behaves. This page is the plain-English tour —
 what each rule does, and the failure it exists to prevent.
 
@@ -122,6 +122,57 @@ researched nowhere while looking complete.
 `decision-only` never escalates: zero research is its defining property, not a
 budget it failed to spend. And if the web leg is *also* empty, the honest
 result is "neither resolved this" with `confidence: low`.
+
+### Rule 5b — Problem type and the solution spine
+
+The route says where to look. The **problem type** says what kind of answer the
+loop needs, and the two are decided independently. Every loop is exactly one of:
+
+| Type | The question underneath |
+|---|---|
+| `factual` | What is true? An answer exists somewhere |
+| `diagnostic` | Why does this keep happening? |
+| `design` | What should I build or set up? |
+| `decision` | Which of these should I choose? |
+| `dilemma` | How do I hold two things that pull against each other? |
+
+Every type walks the same six stages: Define, Diagnose, Options, Evaluate,
+Recommend, Check. What differs is depth. A factual question is mostly a full
+Recommend with a brief Check. A diagnostic loop spends its effort on Define,
+Diagnose, Recommend and Check. A dilemma needs a full Define and Check, because
+the hard part is stating the tension and testing the way through it. A stage
+marked `full` carries the effort, `brief` is one to three sentences, and an
+omitted stage is not written. Recommend is the page's existing `## Synthesis`,
+so the spine only adds headings.
+
+The type is chosen from the loop's title and your words, before any research, and
+never changes afterwards: findings change the answer, not the kind of question.
+When it is truly unclear, the rule picks the type that requires more stages
+(`dilemma` before `design` before `diagnostic` before `decision` before
+`factual`), because an unneeded stage costs a few words and a missing one costs
+the answer.
+
+Three things the spine never licenses:
+
+- **An uncited claim.** Each Diagnose entry is a claim like any other, under
+  rules 8 and 13. An assumption is labelled as an assumption and is never
+  evidence.
+- **An invented criterion.** A criterion for choosing is yours: a real phrase
+  you wrote in one of the loop's own conversations, or nothing. Something you
+  said about a different question does not count, and neither does anything
+  Dreamer wrote. With no criterion on record the recommendation is provisional
+  and Dreamer asks you.
+- **A decision.** Dreamer recommends, naming one listed option (which may be
+  "Leave it"), and only you resolve a loop. For a dilemma the recommendation is
+  the smallest experiment that would teach you something.
+
+**Why:** a conclusion with no structure reads well and hides what it never did:
+it can recommend without having looked at alternatives, or stop at a diagnosis
+when you needed a plan. A fixed shape makes the omissions visible, and checking
+the shape in code, rather than asking the model to behave, keeps the check
+honest. The spine can lower a conclusion's confidence when it is defective and
+can never raise it, which keeps it consistent with rule 13. It runs only while
+`solving.enabled` is true.
 
 ---
 
@@ -303,11 +354,17 @@ A loop that already has a conclusion is eligible for re-research **only** if:
 - a new occurrence contradicts it, falls outside its scope, or hits one of its
   listed open sub-questions, or
 - it is `web`/`mixed`-routed and older than the staleness horizon (external
-  facts rot; principles don't).
+  facts rot; principles don't), or
+
+- the conclusion was provisional because it had no criterion of yours to
+  weigh options against, and you have since answered the question it was
+  waiting on. That answer is new primary evidence that was asked for by name,
+  so this is the one case exempt from the cooldown below.
 
 Otherwise the resurfacing appends the occurrence, bumps relevance, and the
 existing conclusion is **served** — zero research calls, no superseding page —
-with the serve recorded in the digest. A hard cooldown applies regardless.
+with the serve recorded in the digest. A hard cooldown applies regardless
+(apart from the provisional case above).
 
 > **Re-processing must stay linear in *new input*, never proportional to the
 > size of what Dreamer has already written.**
@@ -342,11 +399,27 @@ every future repair of a state-relationship defect ships with a matching
 healthcheck assertion or lint invariant — otherwise the spine decays into a
 museum of past defects.
 
+Freshness is part of the spine. For every area of the system
+(each source, each job, each hand-off between steps) `scripts/freshness.py`
+works out when it last ran, last produced something and last received input,
+from a heartbeat each job records on exit and from the existing ledgers. The
+health check reads those verdicts and never computes them. Freshness assertions
+are only ever `degraded` and never block a leg, because blocking work since the
+system is stale would make it staler. And "produced nothing" is not stale on its
+own: a quiet night is legitimate. The opt-in board publisher is a read-only
+projection of current conclusions for a display. It publishes an allow-list of
+sections, never web excerpts or the egress record, writes nothing to the vault
+and does nothing unless you turn it on.
+
 One carve-out: the one-time thread and tag backfills
 (`bin/thread-backfill.sh`, `bin/tag-backfill.sh`) may touch `paused` and
 `decision-only` pages once, at feature initialization. Without it the
 backfill's value dies against rule 2 — the same tension rule 3's decay floor
 resolves for a backfill's timestamps. Rule 2 binds every night thereafter.
+
+**Why freshness:** a quiet system and a stopped system produce the same quiet
+digest. Recording when each thing last ran, separately from when it last
+produced anything, is what lets you tell them apart.
 
 **Why the thread:** a loop with a dozen occurrences used to be a flat link
 list — the *movement* of the idea across months was exactly the thing worth
@@ -355,6 +428,101 @@ defect had the same shape — a state change happened somewhere, and the
 component gating on it was never told. Asserting those relationships
 mechanically, on every run, keeps that class of failure visible instead of
 silent.
+
+---
+
+## Rule 16 — Owner writes (the Worried Friend)
+
+Loops track what you keep circling. **Goals** track what you have committed to:
+a finish line, why it matters, a plan. They are sibling objects and neither turns
+into the other. A goal exists only because you made it.
+
+The rule has six parts:
+
+1. **Sibling objects.** Goals live in `vault/goals/`, loops in `vault/loops/`,
+   and they are never converted.
+2. **Authorization by quote.** Every state change made through the MCP server
+   (`commit_goal`, `set_status`, `revise_plan`, `complete_step` and the other
+   owner-write tools) must carry a verbatim quote from the current conversation
+   and a session id. The assistant cannot infer, invent or assume your consent.
+3. **Domain modules only.** A tool handler never writes to disk itself. All
+   mutation goes through the modules that own it, so each write is atomic and
+   passes the same validation as every other path.
+4. **A ledger, and verification.** Every write is recorded. The health check
+   later looks for your quote in the Human turns of ingested transcripts. A write
+   still unmatched after the lag is *quarantined*, never reverted, and turned into
+   a question for you. A quarantine with no way for you to resolve it would be a
+   silent dead end, so there is always an exit.
+5. **Verified attachments.** The nightly assessor attaches a conversation to a
+   goal only when its anchor quote appears in a turn you wrote, and dates the
+   attachment from the transcript, not from model output. When unsure it does not
+   attach, because a false attachment resets a clock and silences a check-in.
+6. **No numeric progress.** Goal pages record progress as plan steps and prose.
+   No percentages, scores or gauges.
+
+**Why:** a system that can write down your commitments is a system that can write
+down commitments you never made. Requiring your own words, and later checking
+them against the record, keeps authorship yours without trusting the assistant's
+memory of what you agreed. A false attachment is worse than a missed one for the
+same reason a false merge is worse than a false split (rule 7): the silence
+check-ins read the clocks, and a wrong reset hides a goal that has gone quiet.
+Numeric progress is excluded because a number looks more certain than the
+evidence supports, and it invites the system to optimise the number.
+
+Goal pages also follow rules 2, 11 and 13: a goal page shows a zero diff on a
+night with nothing attached to it, the goal catalog is read before any goal page,
+and the assessment section is derived tier.
+
+---
+
+## Rule 17 — The knowledge frontier
+
+For each active goal, Dreamer keeps a map of what you know against what the goal
+needs, and teaches the gaps as lessons. The lessons go to the lesson consumer you
+configure (the "show"). Nothing is sent until you set `frontier.show_url`.
+
+The rule has seven parts:
+
+1. **Owner words only.** Only your own words, from a turn you wrote, can place an
+   item in a "known" quadrant, and pasted material is removed first. An assistant
+   reply, a Dreamer page, a lesson you heard and a loop title are *exposure* at
+   most (rule 13). An evidence quote is verbatim from your turn or it is empty.
+2. **Every lesson claim is cited and verified.** A claim cites a primary source,
+   and code fetches that source and checks that its passage says it. A claim
+   without one is dropped, and a lesson that cannot teach without it is not made.
+   A separate check, shown the lesson beside its passages, rejects anything else,
+   and the release step refuses a lesson that fails its integrity check whatever
+   the health check reports.
+3. **The ceiling.** At most `frontier.weekly_ceiling` new lessons in any trailing
+   `frontier.ceiling_window_days`. Follow-ups are exempt. A week with none is
+   normal and nothing is padded to fill it.
+4. **The egress gate.** Research sends generic questions only, for every goal and
+   whatever its topic. A checker examines each query before the call and again
+   inside it. A failing query is dropped, never rewritten (rule 12 applies in
+   full).
+5. **Restricted calls.** Every frontier model call except research is sealed: no
+   tools, no MCP servers, input inlined. Each has a named contract and fails per
+   item, never per run.
+6. **Taps.** A "Got it" or "Dig deeper", from the consumer or through Claude, is
+   applied once, and only an owner write undoes it. Every change of quadrant
+   records its cause. A tap id the lesson already holds with a different kind or
+   time is a reused id: it is reported and not applied. An operator can stop a
+   lesson that has not aired.
+7. **No numbers.** The map page and any display show no counts, ratios or scores.
+
+**Why:** a map of your knowledge is only useful if you can trust where an item
+sits, and the only trustworthy evidence that you know something is that you said
+it. Letting an assistant's explanation count would fill the map with things you
+were merely shown. Lessons are the part that reaches you, so they carry the
+strictest checks: a fluent lesson with an invented claim is worse than none, which
+is why a claim must be found in a fetched passage by code, not recalled by a
+model. The ceiling protects your attention; a system that teaches without limit
+trains you to ignore it. The egress gate exists because goals are private and a
+search engine is not: generic questions are the only kind safe to send, and a
+query that fails the check is dropped, since rewriting it would mean trusting a
+model to decide what is safe. Sealing the other calls means a poisoned transcript
+has nothing to reach with. Finally, a number invites optimising the number, as in
+rule 16.
 
 ---
 
