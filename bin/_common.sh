@@ -90,10 +90,19 @@ arm_heartbeat() {
 
 # --- advisory vault lock (wiki-lock) -------------------------------------
 LOCKFILE="$META/wiki.lock"
+# It WAITS up to locks.cron_wait_seconds before skipping: a frontier apply holds
+# wiki.lock for seconds, and a night job that starts inside one should wait, not lose its
+# run. A job blocked for longer still skips cleanly. A missing key is fatal, never a
+# silent fall-back to "do not wait".
 acquire_lock() {
+  local wait
+  wait=$("$PY" -c "import yaml;print(yaml.safe_load(open('$ROOT/config.yaml'))['locks']['cron_wait_seconds'])" 2>/dev/null || true)
+  if [[ ! "$wait" =~ ^[0-9]+$ ]]; then
+    die "config.yaml locks.cron_wait_seconds is missing or not a whole number"
+  fi
   exec 9>"$LOCKFILE"
-  if ! flock -n 9; then
-    log "vault is locked by another job — exiting cleanly (no work lost)"
+  if ! flock -w "$wait" 9; then
+    log "vault is still locked by another job after ${wait}s — exiting cleanly (no work lost)"
     mark_skipped
     exit 0
   fi
@@ -104,6 +113,53 @@ acquire_lock() {
   # dreamer_common.state_lock skips its own flock; the parent's held lock
   # already serializes every write made under it.
   export DREAMER_LOCK_HELD=1
+}
+
+# --- frontier lock -------------------------------------------------
+# bin/frontier.sh and bin/frontier-backfill.sh hold this for their WHOLE run so
+# they never overlap. It is not wiki.lock: a frontier run spends hours inside
+# model calls and takes wiki.lock only around each apply-and-commit step
+# (commit_locked below, and the apply inside scripts/frontier_map.py), so the
+# owner's MCP writes and the other cron jobs are never blocked behind it.
+# The file name comes from config (frontier.lock_file, under the meta dir).
+acquire_frontier_lock() {
+  local name
+  name=$("$PY" -c "import yaml;print(yaml.safe_load(open('$ROOT/config.yaml'))['frontier']['lock_file'])" 2>/dev/null || true)
+  if [[ -z "$name" ]]; then
+    die "config.yaml frontier.lock_file is missing"
+  fi
+  exec 8>"$META/$name"
+  if ! flock -n 8; then
+    log "another frontier run holds $name — exiting cleanly (no work lost)"
+    mark_skipped
+    exit 0
+  fi
+  echo "$JOB:$$:$(date -Is)" >&8 || true
+}
+
+# commit_locked <message> — commit() under wiki.lock, waiting up to
+# frontier.vault_lock_wait_seconds. A run that does NOT hold wiki.lock (the
+# frontier jobs) uses this so the git add/commit never races a job that does.
+# On a busy lock the commit is skipped; the next call carries the changes.
+commit_locked() {
+  local wait rc=0
+  wait=$("$PY" -c "import yaml;print(yaml.safe_load(open('$ROOT/config.yaml'))['frontier']['vault_lock_wait_seconds'])" 2>/dev/null || true)
+  if [[ ! "$wait" =~ ^[0-9]+$ ]]; then
+    # no hardcoded fallback: a mistyped key must be seen, so the commit is skipped and said
+    log "config.yaml frontier.vault_lock_wait_seconds is missing or not a whole number — commit left for the next batch"
+    return 1
+  fi
+  exec 9>"$LOCKFILE"
+  if ! flock -w "$wait" 9; then
+    log "wiki.lock busy after ${wait}s — commit left for the next batch"
+    exec 9>&-
+    return 1
+  fi
+  export DREAMER_LOCK_HELD=1
+  commit "$1" || rc=$?
+  unset DREAMER_LOCK_HELD
+  exec 9>&-
+  return $rc
 }
 
 # --- health spine ----------------------------------------------------------
@@ -123,7 +179,7 @@ run_healthcheck() {
 # A usage-limit exit is a NORMAL outcome that defers work to the next run
 # (Principle 9). It must be logged honestly and must not look like success.
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
-# run_claude <prompt_file> <max_turns> <out_file> [restricted]
+# run_claude <prompt_file> <max_turns> <out_file> [restricted|gated]
 #
 # The optional 4th argument selects the tool surface:
 #   (absent)     — the research surface: qmd + web, acceptEdits. For jobs
@@ -134,6 +190,18 @@ CLAUDE_BIN="${CLAUDE_BIN:-claude}"
 #                  max-turns capped at 4. For jobs whose prompt inlines
 #                  private vault content that must never leak into a query
 #                  (rule 12) — tag-backfill and the thread-fold drain.
+#                  SEALED: also --tools "" (no built-in tools),
+#                  --strict-mcp-config with no --mcp-config (no MCP servers)
+#                  and --disable-slash-commands, so a tool the deny list
+#                  forgot (Agent, Skill, ToolSearch, any user-scope MCP write
+#                  tool) is absent rather than merely denied.
+#   gated        — the frontier research call: the ONLY tool is
+#                  WebSearch, behind scripts/egress_hook.py (loaded through
+#                  --settings), which allows a search only for a query in the
+#                  file named by $DREAMER_EGRESS_APPROVED and logs every
+#                  decision to $DREAMER_EGRESS_LOG (default: config
+#                  frontier.egress.log_path). No qmd, no WebFetch, no shell.
+#                  Turns come from budget.max_turns_frontier_research.
 run_claude() {
   local prompt_file="$1" max_turns="$2" out_file="$3" tool_mode="${4:-full}"
   local raw="$out_file.raw.json"
@@ -151,9 +219,43 @@ run_claude() {
     return $fake_code
   fi
 
+  local settings_file="" egress_log=""
+  if [[ "$tool_mode" == "gated" ]]; then
+    if [[ -z "${DREAMER_EGRESS_APPROVED:-}" ]]; then
+      log "run_claude gated: DREAMER_EGRESS_APPROVED is not set — refusing to start an ungated research call"
+      return 2
+    fi
+    egress_log="${DREAMER_EGRESS_LOG:-}"
+    if [[ -z "$egress_log" ]]; then
+      egress_log=$("$PY" -c "import yaml;print(yaml.safe_load(open('$ROOT/config.yaml'))['frontier']['egress']['log_path'])" 2>/dev/null || true)
+    fi
+    if [[ -z "$egress_log" ]]; then
+      log "run_claude gated: no egress log path (DREAMER_EGRESS_LOG / frontier.egress.log_path) — refusing"
+      return 2
+    fi
+    local gated_turns
+    gated_turns=$("$PY" -c "import yaml;print(yaml.safe_load(open('$ROOT/config.yaml'))['budget'].get('max_turns_frontier_research') or '')" 2>/dev/null || true)
+    if [[ -n "$gated_turns" ]]; then max_turns="$gated_turns"; fi
+    settings_file="$out_file.settings.json"
+    "$PY" - "$settings_file" "$PY" "$ROOT/scripts/egress_hook.py" "$ROOT/scripts/egress_results_hook.py" <<'PYEOF' \
+      || { log "run_claude gated: could not write the hook settings file — refusing"; return 2; }
+import json, shlex, sys
+out, py, hook, results_hook = sys.argv[1:5]
+# PostToolUse records every URL a WebSearch returned: code fetches a URL the model
+# names only if a search actually returned it (no recorded URL, no fetch).
+cfg = {"hooks": {
+    "PreToolUse": [{"matcher": "*", "hooks": [
+        {"type": "command", "command": f"{shlex.quote(py)} {shlex.quote(hook)}"}]}],
+    "PostToolUse": [{"matcher": "WebSearch", "hooks": [
+        {"type": "command", "command": f"{shlex.quote(py)} {shlex.quote(results_hook)}"}]}]}}
+with open(out, "w") as fh:
+    json.dump(cfg, fh)
+PYEOF
+  fi
+
   set +e
   # acceptEdits alone blocks Bash, which silently kills the qmd research leg —
-  # found live 2026-08-02 when a dream conclusion reported "qmd blocked at the
+  # a dream conclusion once reported "qmd blocked at the
   # permission layer" for every collection. Allow exactly what the jobs need:
   # qmd search plus the web tools the web/mixed routes are contractually
   # permitted (CLAUDE.md rules 5/12). Nothing broader: this process runs
@@ -165,6 +267,7 @@ run_claude() {
   local model
   model=$("$PY" -c "import yaml;print(yaml.safe_load(open('$ROOT/config.yaml'))['budget'].get('model') or '')" 2>/dev/null || true)
   local -a perm_args
+  local -a env_args=()
   if [[ "$tool_mode" == "restricted" ]]; then
     # Output-only. No --permission-mode acceptEdits (so no edit permission),
     # no --allowedTools (so nothing is pre-approved and headless denies by
@@ -173,16 +276,41 @@ run_claude() {
     # denied too: a restricted prompt inlines everything it may see, and a
     # read tool would let it browse private vault content the caller never
     # inlined. Both MCP servers (qmd, dreamer) are shut for the same reason.
-    perm_args=(--disallowedTools "Bash" "Edit" "Write" "NotebookEdit" "Task"
+    #
+    # Seal: --tools, --allowedTools and --disallowedTools are variadic
+    # (commander reads values until the next flag). The empty --tools value is
+    # its own argv element and a flag follows it; --disallowedTools goes last
+    # because only stdin follows it. tests/test_run_claude_argv.py pins this.
+    perm_args=(--tools "" --strict-mcp-config --disable-slash-commands
+               --disallowedTools "Bash" "Edit" "Write" "NotebookEdit" "Task"
                "WebSearch" "WebFetch" "Read" "Glob" "Grep" "LS"
                "mcp__qmd" "mcp__dreamer")
     # Restricted jobs are contractually single-shot: the input is inlined and
     # the reply is one JSON object. Tool attempts still happen (the model may
     # try a denied Read and needs a turn to recover from the rejection), and a
     # 2-turn cap turned that recoverable nudge into is_error/stop_reason=
-    # tool_use (observed live, 2026-08-16). The security property is the deny
+    # tool_use (seen in practice). The security property is the deny
     # list, not the cap — keep a small recovery margin.
     if [[ "$max_turns" -gt 4 ]]; then max_turns=4; fi
+  elif [[ "$tool_mode" == "gated" ]]; then
+    # WebSearch is pre-approved only so a headless run does not stall on a
+    # permission prompt; the PreToolUse hook is the decider (its deny wins).
+    #
+    # This call reads untrusted search results and its output names URLs that
+    # code then fetches, so it must not hold private context a hijacked
+    # result could leak into a URL: --setting-sources drops the user's
+    # settings (hooks, plugins), CLAUDE_CODE_DISABLE_CLAUDE_MDS stops every
+    # CLAUDE.md loading (--setting-sources alone leaves ~/.claude/CLAUDE.md in
+    # context) and the auto-memory var drops memory.
+    # --settings (flag settings) always loads, so the egress hooks still apply.
+    # Not --bare: that disables OAuth (subscription) login.
+    perm_args=(--tools WebSearch --strict-mcp-config --disable-slash-commands
+               --setting-sources project,local
+               --settings "$settings_file" --allowedTools WebSearch)
+    env_args=(env "DREAMER_EGRESS_APPROVED=$DREAMER_EGRESS_APPROVED"
+              "DREAMER_EGRESS_LOG=$egress_log"
+              "DREAMER_EGRESS_RESULTS=${DREAMER_EGRESS_RESULTS:-$DREAMER_EGRESS_APPROVED.results}"
+              "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1" "CLAUDE_CODE_DISABLE_CLAUDE_MDS=1")
   else
     perm_args=(--permission-mode acceptEdits
                --allowedTools "Bash(qmd:*)" "mcp__qmd" "WebSearch" "WebFetch")
@@ -194,7 +322,7 @@ run_claude() {
   # that as a usage-limit deferral — an honest-looking log line for a bug that
   # recurs every run. convert_cc_sessions' bounded_prompt() was the local
   # workaround for the same limit in one job; stdin fixes it for every job.
-  "$CLAUDE_BIN" -p \
+  "${env_args[@]}" "$CLAUDE_BIN" -p \
       --output-format json \
       ${model:+--model "$model"} \
       --max-turns "$max_turns" \
@@ -508,6 +636,35 @@ reindex() {
   # rather than inheriting last night's record.
   record_reindex ${updated[@]+"${updated[@]}"}
   return $rc
+}
+
+# reindex_collection <name> — refresh the index, then embed ONE qmd collection
+# (the frontier backfill runs it before every batch so matching sees what the
+# last batch wrote). `qmd update` has no collection filter: it re-indexes every
+# collection (`-c` is silently ignored), which is cheap and
+# harmless; only `qmd embed -c` is per collection. Unlike reindex() it records
+# no coverage, because the embed covered one collection only. Embed failure is
+# degraded, never fatal; an update failure returns 1.
+reindex_collection() {
+  local c="$1"
+  if ! command -v qmd >/dev/null 2>&1; then
+    log "ERROR: qmd not on PATH — collection '$c' not refreshed"
+    record_event "degraded" "qmd unreachable: collection '$c' not refreshed"
+    return 1
+  fi
+  if ! (cd "$ROOT" && qmd update 2>&1); then
+    log "ERROR: qmd update FAILED (see log)"
+    record_event "degraded" "qmd re-index failed for collection '$c' — retrieval may be stale"
+    return 1
+  fi
+  log "qmd re-index ok: $c"
+  if (cd "$ROOT" && qmd embed -c "$c" 2>&1); then
+    log "qmd embed ok: $c"
+  else
+    log "ERROR: qmd embed -c $c FAILED (see log)"
+    record_event "degraded" "qmd embed failed for collection '$c' — vector search may answer from stale embeddings (lexical index is fresh)"
+  fi
+  return 0
 }
 
 # Writes {"collections": [...], "at": "<iso>"} under `last_reindex` in

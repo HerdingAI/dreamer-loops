@@ -30,8 +30,9 @@ FILE = "heartbeats.json"
 OUTCOMES = ("ok", "failed", "skipped")
 
 # One record per publisher. `publish` is the freshness (health) publisher;
-# `publish_board` is the opt-in content publisher.
-PUBLISH_TARGETS = ("publish", "publish_board")
+# `publish_board` is the opt-in content publisher;
+# `publish_frontier` is the opt-in knowledge-map publisher (frontier_publish.py).
+PUBLISH_TARGETS = ("publish", "publish_board", "publish_frontier")
 
 
 def clock() -> _dt.datetime:

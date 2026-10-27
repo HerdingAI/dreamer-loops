@@ -24,7 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from dreamer_common import CFG, p, read_json  # noqa: E402
+from dreamer_common import CFG, as_date, p, read_json, read_page  # noqa: E402
 import apply_assessment as A  # noqa: E402
 import heartbeat as HB  # noqa: E402
 import make_batch as MB  # noqa: E402
@@ -81,12 +81,21 @@ AXES = [
     {"axis": "job.decay-archive", "kind": "job", "label": "Weekly decay",
      "rule": "job", "job": "decay-archive",
      "limit": ("freshness", "weekly_job_max_age_days", HOURS_PER_DAY)},
+    {"axis": "job.frontier", "kind": "job", "label": "Knowledge frontier",
+     "rule": "job", "job": "frontier", "limit": ("freshness", "job_max_age_hours", 1.0)},
     {"axis": "job.healthcheck", "kind": "job", "label": "Healthcheck",
      "rule": "healthcheck", "limit": ("health", "checked_max_age_hours", 1.0)},
     {"axis": "converge.extraction", "kind": "convergence", "label": "Transcripts awaiting extraction",
      "rule": "extraction", "limit": ("freshness", "extract_lag_days", HOURS_PER_DAY)},
     {"axis": "converge.assessment", "kind": "convergence", "label": "Transcripts awaiting assessment",
      "rule": "assessment", "limit": ("freshness", "assess_lag_days", HOURS_PER_DAY)},
+    # Transcripts waiting to be mapped (one batch a night). Reads info until the map
+    # ledger exists: a backfill that has not begun is not a stalled one.
+    {"axis": "converge.frontier-map", "kind": "convergence", "label": "Transcripts awaiting the frontier map",
+     "rule": "frontier-map", "limit": ("freshness", "frontier_map_lag_days", HOURS_PER_DAY)},
+    # `limit` is the slack; the rule adds frontier.premortem_every_days (the window).
+    {"axis": "converge.premortem", "kind": "convergence", "label": "Goals awaiting a pre-mortem",
+     "rule": "premortem", "limit": ("freshness", "frontier_premortem_slack_days", HOURS_PER_DAY)},
     {"axis": "converge.folds", "kind": "convergence", "label": "Thread folds queued",
      "rule": "folds", "limit": ("thread", "fold_queue_max_age_days", HOURS_PER_DAY)},
     {"axis": "converge.search-index", "kind": "convergence", "label": "Search index",
@@ -104,6 +113,15 @@ AXES = [
     {"axis": "publish.board", "kind": "publish", "label": "Board publish",
      "rule": "publish", "record": "publish_board", "off_reason": "disabled",
      "limit": ("freshness", "publish_max_age_hours", 1.0)},
+    # The opt-in knowledge-map publisher (frontier_publish.py, DREAMER_PUBLISH_FRONTIER).
+    {"axis": "publish.frontier", "kind": "publish", "label": "Frontier publish",
+     "rule": "publish", "record": "publish_frontier", "off_reason": "disabled",
+     "limit": ("freshness", "publish_max_age_hours", 1.0)},
+    # The opt-in lesson sync with the show (frontier_sync.py), judged from its state file.
+    # Off (info / disabled) while frontier.show_url is empty.
+    {"axis": "publish.lesson-sync", "kind": "publish", "label": "Lesson sync",
+     "rule": "lesson-sync", "limit": ("freshness", "job_max_age_hours", 1.0),
+     "enabled_by": ("frontier", "show_url"), "off_reason": "disabled"},
 ]
 
 
@@ -324,8 +342,9 @@ def _rule_owner_writes(spec, hb, state, now):
     return _axis(spec, reason=reason, last_arrival=_iso(newest))
 
 
-def _backlog_axis(spec, waiting: list[_dt.datetime], now, empty_reason="backlog empty"):
-    limit = _limit_h(spec)
+def _backlog_axis(spec, waiting: list[_dt.datetime], now, empty_reason="backlog empty",
+                  limit: float | None = None):
+    limit = _limit_h(spec) if limit is None else limit
     if not waiting:
         return _axis(spec, status="ok", reason=empty_reason, backlog=0,
                      threshold_hours=limit)
@@ -346,6 +365,52 @@ def _rule_assessment(spec, hb, state, now):
         return _backlog_axis(spec, [], now, empty_reason="no active goal")
     waiting = [_mtime(f) for f in A.select_transcripts(limit=sys.maxsize)]
     return _backlog_axis(spec, waiting, now)
+
+
+def _rule_frontier_map(spec, hb, state, now):
+    """Transcripts the map has not caught up with: never mapped, or grown since. One the
+    map gave up on (skipped) is not waiting; frontier-stuck-items reports it."""
+    path = p("meta") / CFG["frontier"]["map_ledger_file"]
+    if not path.exists():
+        return _axis(spec, reason="map not started", threshold_hours=_limit_h(spec))
+    # Imported here, not at the top: every job's exit trap loads this module, and a broken
+    # frontier module must cost only its own axes (compute() isolates each rule).
+    import frontier_map as FM
+    ledger = FM.load_ledger()
+    waiting = []
+    for f in MB.all_transcripts():
+        rel = MB.rel_of(f)
+        if rel in ledger["skipped"]:
+            continue
+        done = ledger["done"].get(rel)
+        if done is not None:
+            count = read_page(f)[0].get("message_count")
+            if not isinstance(count, int) or int(done.get("message_count", 0)) >= count:
+                continue
+        waiting.append(_mtime(f))
+    return _backlog_axis(spec, waiting, now)
+
+
+def _rule_premortem(spec, hb, state, now):
+    """An active goal whose newest pre-mortem (else its creation) is older than
+    frontier.premortem_every_days plus the slack. Judged on the date, so a goal is
+    never stale for a pre-mortem the nightly run was not yet due to write."""
+    window = int(CFG["frontier"]["premortem_every_days"]) * HOURS_PER_DAY
+    limit = window + _limit_h(spec)
+    active = [g for g in A.G.load_goals() if g.status == "active"]
+    if not active:
+        return _backlog_axis(spec, [], now, empty_reason="no active goal", limit=limit)
+    import frontier_gaps as FG  # deferred, as in _rule_frontier_map
+    waiting = []
+    for g in active:
+        rec = FG.latest_record(g.id)
+        since = as_date(rec["date"]) if rec else g.created
+        if since is None:
+            continue
+        stamp = _dt.datetime.combine(since, _dt.time())
+        if (_age_h(now, stamp) or 0.0) > window:
+            waiting.append(stamp)
+    return _backlog_axis(spec, waiting, now, limit=limit)
 
 
 def _rule_folds(spec, hb, state, now):
@@ -388,9 +453,19 @@ def _rule_publish(spec, hb, state, now):
                  threshold_hours=limit)
 
 
+def _rule_lesson_sync(spec, hb, state, now):
+    rec = read_json(p("meta") / CFG["frontier"]["sync_state_file"], default={}) or {}
+    stamps = [_parse(rec.get(k)) for k in ("last_pull_at", "last_push_at")]
+    last = max((d for d in stamps if d is not None), default=None)
+    limit = _limit_h(spec)
+    status, reason = _judge(_age_h(now, last), limit, "last sync")
+    return _axis(spec, status=status, reason=reason, last_ran=_iso(last), threshold_hours=limit)
+
+
 RULES = {"job": _rule_job, "healthcheck": _rule_healthcheck, "source": _rule_source,
-         "owner-writes": _rule_owner_writes, "claude-ai-sync": _rule_claude_ai_sync, "extraction": _rule_extraction,
-         "assessment": _rule_assessment, "folds": _rule_folds,
+         "owner-writes": _rule_owner_writes, "claude-ai-sync": _rule_claude_ai_sync, "lesson-sync": _rule_lesson_sync, "extraction": _rule_extraction,
+         "assessment": _rule_assessment, "frontier-map": _rule_frontier_map,
+         "premortem": _rule_premortem, "folds": _rule_folds,
          "search-index": _rule_search_index, "output": _rule_output,
          "publish": _rule_publish}
 

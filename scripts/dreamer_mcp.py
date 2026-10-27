@@ -48,6 +48,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from dreamer_common import (  # noqa: E402
     CFG, as_date, atomic_write, p, read_json, read_page, state_lock, today,
 )
+import frontier as F  # noqa: E402
 import goals as G  # noqa: E402
 import questions as Q  # noqa: E402
 import publish_trigger as PT  # noqa: E402
@@ -690,6 +691,208 @@ def tool_set_status(
             return json.dumps({"error": f"unrecognized identifier {target_id!r} (expected Gxxxx or Lxxxx)"})
 
 
+# --------------------------------------------------------------------------
+# Knowledge frontier tools. Reads walk the frontier pages through
+# frontier.py; the two writes go through frontier.tap_lesson / undo_tap, which
+# own the ledger entry (rule 16). Nothing here touches a file.
+# --------------------------------------------------------------------------
+
+# What each evidence kind licenses Claude to say. Rule 13: only the owner's words count.
+EVIDENCE_KINDS_LEGEND = {
+    "explained": "the owner explained it in their own words",
+    "decided": "the owner made a decision that rests on it",
+    "applied": "the owner used it in their own work",
+    "asked": "the owner asked about it; this is NOT evidence they know it",
+    "reconstructed": "the owner worked it out with the assistant's help; do not claim they knew it beforehand",
+    "exposure": "the assistant said it in a chat; this is NOT the owner's knowledge",
+}
+NO_QUOTE_NOTE = "raised in this chat; no verbatim quote on record"
+
+
+def _frontier_cap() -> int:
+    return int(F._cfg("mcp_max_items"))
+
+
+def _evidence_rows(item: F.Item) -> list[dict]:
+    rows = []
+    for e in item.evidence:
+        row = {"kind": e["kind"], "transcript": e["transcript"], "date": e["date"],
+               "quote": e["quote"] or None}
+        if not e["quote"]:
+            # Never substitute the item or loop title: that is Dreamer's text, not the owner's.
+            row["note"] = NO_QUOTE_NOTE
+        rows.append(row)
+    return rows
+
+
+def _latest_evidence(item: F.Item) -> str:
+    return max((e["date"] for e in item.evidence), default="")
+
+
+def _all_items() -> list[F.Item]:
+    d = F.items_dir()
+    return [F.Item.from_path(path) for path in sorted(d.glob("K*.md"))] if d.exists() else []
+
+
+def _all_lessons() -> list[F.Lesson]:
+    d = F.lessons_dir()
+    return [F.Lesson.from_path(path) for path in sorted(d.glob("K*.md"))] if d.exists() else []
+
+
+def _newest_first(items: list[F.Item]) -> list[F.Item]:
+    # Two stable sorts: id ascending, then latest evidence descending.
+    return sorted(sorted(items, key=lambda i: i.id), key=_latest_evidence, reverse=True)
+
+
+def _lesson_state(les: F.Lesson) -> dict:
+    return {"id": les.id, "status": les.status, "kind": les.kind}
+
+
+def tool_what_do_i_know(topic: str) -> str:
+    record_access("what_do_i_know", (topic or "")[:80])
+    # Plain case-insensitive match over the map: every word of the topic must appear in the
+    # item's title or summary (items carry no aliases). Deterministic and needs no qmd service.
+    words = [w for w in re.split(r"\W+", (topic or "").lower()) if w]
+    if not words:
+        return json.dumps({"error": "topic is empty"})
+    hits = []
+    for item in _all_items():
+        hay = f"{item.title} {item.summary}".lower()
+        if all(w in hay for w in words):
+            hits.append(item)
+    hits = _newest_first(hits)
+    cap = _frontier_cap()
+    shown, more = hits[:cap], len(hits) > cap
+    lessons = {}
+    for les in _all_lessons():
+        lessons.setdefault(les.item, []).append(_lesson_state(les))
+    out = {
+        "topic": topic, "count": len(shown), "more": more,
+        "evidence_kinds": EVIDENCE_KINDS_LEGEND,
+        "items": [{"id": i.id, "title": i.title, "quadrant": i.quadrant,
+                   "evidence": _evidence_rows(i), "goals": i.goals,
+                   "lessons": lessons.get(i.id, [])} for i in shown],
+    }
+    if not shown:
+        out["message"] = f"Nothing on record about {topic!r}: no item in the knowledge map matches."
+    return json.dumps(out, indent=2)
+
+
+def _find_goal(ref: str) -> G.Goal | None:
+    needle = (ref or "").strip().lower()
+    goals = G.load_goals()
+    return (next((g for g in goals if g.id.lower() == needle), None)
+            or next((g for g in goals if g.title.strip().lower() == needle), None))
+
+
+def tool_get_frontier(goal: str) -> str:
+    record_access("get_frontier", (goal or "")[:80])
+    g = _find_goal(goal)
+    if g is None:
+        return json.dumps({"error": f"no goal matching {goal!r}"})
+    import frontier_gaps as FG  # deferred: pulls in the frontier model-call stack
+    items = _newest_first([i for i in _all_items() if any(r["goal"] == g.id for r in i.goals)])
+    cap = _frontier_cap()
+    shown, more = items[:cap], len(items) > cap
+    all_lessons = _all_lessons()
+    quadrants: dict[str, list] = {q: [] for q in F.QUADRANTS}
+    for i in shown:
+        quadrants[i.quadrant].append({
+            "id": i.id, "title": i.title,
+            "relation": next(r["relation"] for r in i.goals if r["goal"] == g.id),
+            "latest_evidence": _latest_evidence(i),
+            "lessons": [_lesson_state(l) for l in all_lessons if l.item == i.id]})
+    rec = FG.latest_record(g.id)
+    premortem = None if rec is None else {
+        "date": rec["date"], "plan_revision": rec["plan_revision"], "causes": rec["causes"],
+        "candidates": [{k: c[k] for k in ("cause_rank", "title", "status", "consequence",
+                                          "consequence_reason", "item")} for c in rec["candidates"]]}
+    out = {
+        "goal": g.id, "title": g.title, "more": more, "quadrants": quadrants,
+        "lessons": [{**_lesson_state(l), "item": l.item, "aired_on": l.aired_on}
+                    for l in all_lessons if l.goal == g.id],
+        "premortem": premortem,
+    }
+    if not items:
+        # Empty quadrants read as "no gaps"; say what the record actually shows (rule 13).
+        out["message"] = ("No pre-mortem has run for this goal yet, so nothing is mapped: "
+                          "this is not a finding that nothing is missing." if rec is None else
+                          f"The pre-mortem of {rec['date']} placed nothing on the map for this goal.")
+    return json.dumps(out, indent=2)
+
+
+def _lesson_or_error(lesson_id: str) -> F.Lesson | None:
+    if not re.fullmatch(r"K\d{4,}-\d+", (lesson_id or "").strip()):
+        return None
+    path = F.lesson_path(lesson_id.strip())
+    return F.Lesson.from_path(path) if path.exists() else None
+
+
+def tool_get_lesson(lesson_id: str) -> str:
+    record_access("get_lesson", (lesson_id or "")[:80])
+    les = _lesson_or_error(lesson_id)
+    if les is None:
+        return json.dumps({"error": f"no such lesson: {lesson_id!r}"})
+    if les.status not in F.DELIVERED_STATUSES:
+        # A rejected lesson failed its fact-check; a ready or held one waits on the
+        # ceiling. Showing either here would bypass the gate the show path enforces.
+        return json.dumps({"error": f"lesson {les.id} has not been sent to you (status {les.status})"})
+    import frontier_lessons as FL  # deferred, like frontier_gaps
+    # Only the display parts: the title and body, and the source list. The page's claims
+    # (spans, passages), its untrusted web excerpts and its egress record never leave
+    # here (rule 10), so this builds the answer from parts instead of filtering the page.
+    title, body = FL.lesson_parts(les)
+    dead = {t.get("tap") for t in les.tombstones}
+    return json.dumps({
+        "id": les.id, "item": les.item, "goal": les.goal, "kind": les.kind,
+        "status": les.status, "title": title, "body": body,
+        "sources": FL.lesson_sources(les),
+        "released_at": les.released_at, "aired_on": les.aired_on,
+        "taps": [{**t, "in_effect": t["id"] not in dead} for t in les.taps],
+        "follow_up": [{"id": l.id, "status": l.status} for l in _all_lessons()
+                      if l.item == les.item and l.kind == "follow_up"
+                      and l.origin_tap and l.origin_tap in {t["id"] for t in les.taps}],
+    }, indent=2)
+
+
+def _frontier_write(tool: str, lesson_id: str, kind: str, owner_quote: str, session_id: str,
+                    verb: str) -> str:
+    record_access(tool, f"{lesson_id} {kind}")
+    auth_err = _validate_auth(owner_quote, session_id)
+    if auth_err:
+        return json.dumps({"error": auth_err})
+    blocked, reason = is_leg_blocked("owner-write")
+    if blocked:
+        return json.dumps({"error": f"owner-write leg is blocked by healthcheck: {reason}"})
+    if _lesson_or_error(lesson_id) is None:
+        return json.dumps({"error": f"no such lesson: {lesson_id!r}"})
+    try:
+        with state_lock(p("meta") / "wiki.lock"):
+            if tool == "tap_lesson":
+                res = F.tap_lesson(lesson_id.strip(), kind, owner_quote, session_id)
+            else:
+                move = F.undo_tap(lesson_id.strip(), kind, "owner",
+                                  cause="owner asked via Claude (their words are in the owner-writes ledger)",
+                                  owner_quote=owner_quote, session_id=session_id)
+                res = {"move": move}
+    except (F.FrontierError, TimeoutError) as exc:
+        return json.dumps({"error": str(exc)})
+    PT.fire()
+    conf = f"Noted: {verb} {kind} on lesson {lesson_id.strip()}."
+    return json.dumps({"ok": True, "lesson": lesson_id.strip(), "kind": kind,
+                       "move": res["move"], **({"tap": res["tap"], "follow_ups_cancelled": res["follow_ups_cancelled"]}
+                          if "tap" in res else {}),
+                       "confirmation": conf}, indent=2)
+
+
+def tool_tap_lesson(lesson_id: str, kind: str, owner_quote: str, session_id: str) -> str:
+    return _frontier_write("tap_lesson", lesson_id, kind, owner_quote, session_id, "tapped")
+
+
+def tool_undo_tap(lesson_id: str, kind: str, owner_quote: str, session_id: str) -> str:
+    return _frontier_write("undo_tap", lesson_id, kind, owner_quote, session_id, "undid")
+
+
 # Words that say nothing about WHICH goal or loop an update is about.
 _EVIDENCE_STOP = frozenset(
     "about after again also been before both done from have just made more much "
@@ -927,6 +1130,8 @@ Goals. The owner authors goals; Dreamer tracks them and never invents one.
 - The owner says a specific step is finished -> complete_step.
 - The owner changes the route -> revise_plan.
 - The owner pauses, resumes, achieves or abandons a goal, or says a tracked loop is settled -> set_status.
+- "What do I already know about X?" -> what_do_i_know. "What's my frontier for goal G?" -> get_frontier.
+- "Tell me more about that lesson" -> get_lesson. "I already know this" / "dig deeper" -> tap_lesson. "Undo that" -> undo_tap.
 - "What does Dreamer want from me?" / weekly review -> list_open_questions, get_latest_digest.
 - The owner answers, or waves off, a question Dreamer raised -> answer_question (defer=true for "leave it").
 
@@ -1287,6 +1492,106 @@ TOOLS = [
             "required": ["question_id", "answer", "owner_quote", "session_id"],
         },
         "handler": tool_answer_question,
+    },
+    {
+        "name": "what_do_i_know",
+        "description": (
+            "Look up what THIS user already knows about a topic, from their own words in "
+            "past conversations. Call this whenever they ask 'what do I already know "
+            "about…', 'do I know anything about…', 'have I thought about…', or before you "
+            "explain something they may have worked out before. Each match has the "
+            "quadrant it sits in, their quotes with the chat and date, and the KIND of "
+            "evidence: explained, decided and applied mean they showed they know it; asked "
+            "means they only asked; reconstructed means they worked it out with help; "
+            "exposure means an assistant said it and it says nothing about what they know. "
+            "Never claim they know more than the kind supports. A row with no quote means "
+            "they raised it in that chat and no verbatim words are on record. An empty "
+            "result says plainly that nothing is on record. The call is fast and local. "
+            "Results are capped and flagged `more` when cut."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"topic": {"type": "string",
+                                     "description": "The topic; every word must appear in the item's title or summary"}},
+            "required": ["topic"],
+        },
+        "handler": tool_what_do_i_know,
+    },
+    {
+        "name": "get_frontier",
+        "description": (
+            "Show the knowledge frontier for one of THIS user's goals: its items grouped "
+            "into known known, known unknown, unknown known and unknown unknown, its "
+            "lessons with their state, and the latest pre-mortem's failure causes and "
+            "verdicts. Call this when they ask 'what's my frontier for…', 'what don't I "
+            "know about my goal…', 'what could make this goal fail', or 'what should I "
+            "learn next for…'. Takes a goal id (G0003) or its exact title; an unknown goal "
+            "is an error. Capped and flagged `more` when cut."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"goal": {"type": "string", "description": "Goal id such as G0003, or its exact title"}},
+            "required": ["goal"],
+        },
+        "handler": tool_get_frontier,
+    },
+    {
+        "name": "get_lesson",
+        "description": (
+            "Fetch one lesson the user has been sent (id like K2001-1): its title, body, "
+            "display sources, whether it aired, which taps are in effect, and any "
+            "follow-up lesson. Call this when they say 'tell me more about that lesson', "
+            "'what was that lesson about', or mention a lesson they just heard on the "
+            "show. It never returns the research behind the lesson, only what the owner "
+            "was given."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"lesson_id": {"type": "string", "description": "Lesson id, e.g. K2001-1"}},
+            "required": ["lesson_id"],
+        },
+        "handler": tool_get_lesson,
+    },
+    {
+        "name": "tap_lesson",
+        "description": (
+            "Record the user's tap on a lesson they heard, exactly as the Got it or Dig "
+            "deeper button in the lesson consumer would. kind is got_it or dig_deeper. Call this "
+            "when they say 'I already know this', 'got it', 'skip that one' (got_it) or "
+            "'dig deeper', 'tell me more about that, in a lesson' (dig_deeper). A got_it "
+            "moves the item to known known. One tap of each kind per lesson. " + _GATE
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "lesson_id": {"type": "string", "description": "Lesson id, e.g. K2001-1"},
+                "kind": {"type": "string", "enum": list(F.TAP_KINDS)},
+                "owner_quote": {"type": "string", "description": _QUOTE},
+                "session_id": {"type": "string", "description": _SESSION},
+            },
+            "required": ["lesson_id", "kind", "owner_quote", "session_id"],
+        },
+        "handler": tool_tap_lesson,
+    },
+    {
+        "name": "undo_tap",
+        "description": (
+            "Undo the user's got_it or dig_deeper tap on a lesson, whether it was made in "
+            "the lesson consumer or through tap_lesson. Call this when they say 'undo that', 'I "
+            "didn't actually get that one', 'take back that tap'. It also cancels a tap "
+            "not yet synced. The item is re-placed from the taps that remain. " + _GATE
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "lesson_id": {"type": "string", "description": "Lesson id, e.g. K2001-1"},
+                "kind": {"type": "string", "enum": list(F.TAP_KINDS)},
+                "owner_quote": {"type": "string", "description": _QUOTE},
+                "session_id": {"type": "string", "description": _SESSION},
+            },
+            "required": ["lesson_id", "kind", "owner_quote", "session_id"],
+        },
+        "handler": tool_undo_tap,
     },
 ]
 

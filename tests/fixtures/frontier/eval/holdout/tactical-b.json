@@ -1,0 +1,25 @@
+{
+  "id": "tactical-b",
+  "kind": "tactical",
+  "call": "consequence",
+  "source": "synthetic",
+  "candidate": {
+    "title": "Naming the studio shelf",
+    "summary": "A label for the shelf where drying mugs sit."
+  },
+  "goal": {
+    "id": "G9001",
+    "title": "Fire a set of glazed pottery mugs",
+    "finish_line": "Four mugs come out of the kiln with an even glaze.",
+    "why": "A hobby the owner wants to finish properly.",
+    "plan": [
+      "Wedge and throw four mugs",
+      "Bisque fire",
+      "Glaze and fire again"
+    ]
+  },
+  "cause": "The mugs are mixed up with someone else's.",
+  "expect": {
+    "verdict": "tactical"
+  }
+}

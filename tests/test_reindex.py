@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""U4 — bin/_common.sh reindex(): config-driven collections, inline embed,
+"""bin/_common.sh reindex(): config-driven collections, inline embed,
 last_reindex coverage record.
 
 reindex() is bash, so this suite shells out (mirroring BashHelperTest in
@@ -46,7 +46,7 @@ esac
 exit 0
 """
 
-CONFIGURED = ["vault", "transcripts", "conclusions", "wisdom"]
+CONFIGURED = ["vault", "transcripts", "conclusions", "wisdom", "frontier"]
 
 
 class ReindexHarness(unittest.TestCase):
@@ -159,7 +159,7 @@ class UpdateFailureTest(ReindexHarness):
         self.assertTrue(any("qmd re-index failed for collection 'transcripts'"
                             in d for d in details), details)
         self.assertEqual(self.state()["last_reindex"]["collections"],
-                         ["vault", "conclusions", "wisdom"])
+                         ["vault", "conclusions", "wisdom", "frontier"])
 
     def test_all_updates_failing_writes_empty_coverage(self) -> None:
         proc = self.run_reindex(update_fail=",".join(CONFIGURED))
@@ -195,6 +195,9 @@ Collections
   wisdom (qmd://wisdom/)
     Pattern:  **/*.md
     Files:    4 (updated 14d ago)
+  frontier (qmd://frontier/)
+    Pattern:  **/*.md
+    Files:    4 (updated 1h ago)
 """
 
 

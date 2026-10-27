@@ -1,0 +1,41 @@
+{
+  "id": "bad_lesson-a",
+  "kind": "bad_lesson",
+  "call": "lesson-check",
+  "source": "synthetic",
+  "flaw": "unsupported-number",
+  "candidate": {
+    "title": "Bisque firing temperature",
+    "summary": "What temperature a first firing reaches."
+  },
+  "cause": "The mugs crack in the first firing.",
+  "expect": {
+    "verdict": "reject"
+  },
+  "lesson": {
+    "title": "Fire the first batch slowly",
+    "body": "A first firing rises slowly so trapped water leaves the clay [1]. Aim for exactly 1999 degrees at the peak [1]."
+  },
+  "sources": [
+    {
+      "id": "S1",
+      "kind": "web",
+      "title": "A kiln handbook",
+      "url": "https://example.org/kiln"
+    }
+  ],
+  "claims": [
+    {
+      "id": "C1",
+      "text": "A first firing should rise slowly so trapped water can leave the clay.",
+      "kind": "fact",
+      "single_source": true,
+      "spans": [
+        {
+          "source": "S1",
+          "span": "rise slowly so trapped water can leave the clay"
+        }
+      ]
+    }
+  ]
+}

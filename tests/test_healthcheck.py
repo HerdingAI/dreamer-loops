@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""U2 — health spine skeleton; U3 — the launch assertion set.
+"""Health spine skeleton and the launch assertion set.
 
 Covers: assertion severity semantics (info / degraded / blocking), the blocked-
 leg record, event-channel wiring, exception isolation between assertions, the
@@ -353,7 +353,7 @@ class BashHelperTest(HealthCase):
 
 
 # --------------------------------------------------------------------------
-# U3 — launch assertions
+# launch assertions
 # --------------------------------------------------------------------------
 
 # Synthetic sample matching the real `qmd status` line SHAPES the parsers
@@ -388,6 +388,9 @@ Collections
   conclusions (qmd://conclusions/)
     Pattern:  **/*.md
     Files:    8 (updated 36m ago)
+  frontier (qmd://frontier/)
+    Pattern:  **/*.md
+    Files:    12 (updated 36m ago)
 
 Examples
   # List files in a collection
@@ -492,7 +495,7 @@ class QmdParserTest(LaunchCase):
     def test_collection_ages_in_hours(self) -> None:
         ages = H.parse_collection_ages(QMD_STATUS_SAMPLE)
         self.assertEqual(set(ages), {"wisdom", "vault", "transcripts",
-                                     "conclusions"})
+                                     "conclusions", "frontier"})
         self.assertAlmostEqual(ages["wisdom"], 14 * 24.0)
         self.assertAlmostEqual(ages["vault"], 0.6)
         self.assertAlmostEqual(ages["transcripts"], 6.0)
@@ -612,7 +615,7 @@ class IndexFreshTest(LaunchCase):
 
     def test_stale_qmd_age_covered_by_recent_reindex_passes(self) -> None:
         now = _dt.datetime.now().isoformat(timespec="seconds")
-        self._reindex_at(now, ["vault", "transcripts", "conclusions", "wisdom"])
+        self._reindex_at(now, ["vault", "transcripts", "conclusions", "wisdom", "frontier"])
         self.stub_qmd(QMD_STATUS_SAMPLE)  # wisdom at 14d vs 30h window
         record = H.run([_row("index-fresh")])
         row = record["assertions"][0]
@@ -622,7 +625,7 @@ class IndexFreshTest(LaunchCase):
     def test_stale_by_both_qmd_age_and_reindex_fails_blocking(self) -> None:
         old = (_dt.datetime.now() - _dt.timedelta(hours=999)) \
             .isoformat(timespec="seconds")
-        self._reindex_at(old, ["vault", "transcripts", "conclusions", "wisdom"])
+        self._reindex_at(old, ["vault", "transcripts", "conclusions", "wisdom", "frontier"])
         self.stub_qmd(QMD_STATUS_SAMPLE)
         record = H.run([_row("index-fresh")])
         row = record["assertions"][0]
@@ -643,7 +646,7 @@ class IndexFreshTest(LaunchCase):
 
     def test_unparseable_reindex_timestamp_does_not_rescue(self) -> None:
         self._reindex_at("not-a-timestamp",
-                         ["vault", "transcripts", "conclusions", "wisdom"])
+                         ["vault", "transcripts", "conclusions", "wisdom", "frontier"])
         self.stub_qmd(QMD_STATUS_SAMPLE)
         record = H.run([_row("index-fresh")])
         self.assertFalse(record["assertions"][0]["ok"])
@@ -667,11 +670,43 @@ class IndexFreshTest(LaunchCase):
         self.assertIn("wisdom", row["detail"])
         self.assertEqual(record["blocked_legs"], ["research"])
 
+    # -- an EMPTY collection: qmd lists it as "Files: 0 (updated never)", so it
+    # has no age. A brand-new collection with no files yet has no age, so it would
+    # block the research leg this way. A recent successful scan of it is the
+    # evidence that it is current; without one it still blocks.
+
+    def _empty_frontier(self) -> str:
+        text = QMD_STATUS_FRESH.replace("Files:    12 (updated 36m ago)",
+                                        "Files:    0 (updated never)")
+        self.assertIn("Files:    0 (updated never)", text)  # the substitution took
+        self.assertNotIn("frontier", H.parse_collection_ages(text))
+        return text
+
+    def test_empty_collection_scanned_by_a_recent_reindex_passes(self) -> None:
+        now = _dt.datetime.now().isoformat(timespec="seconds")
+        self._reindex_at(now, ["vault", "transcripts", "conclusions", "wisdom", "frontier"])
+        self.stub_qmd(self._empty_frontier())
+        record = H.run([_row("index-fresh")])
+        row = record["assertions"][0]
+        self.assertTrue(row["ok"], row["detail"])
+        self.assertEqual(record["blocked_legs"], [])
+
+    def test_empty_collection_with_no_recent_scan_still_blocks(self) -> None:
+        old = (_dt.datetime.now() - _dt.timedelta(hours=999)) \
+            .isoformat(timespec="seconds")
+        self._reindex_at(old, ["vault", "transcripts", "conclusions", "wisdom", "frontier"])
+        self.stub_qmd(self._empty_frontier())
+        record = H.run([_row("index-fresh")])
+        row = record["assertions"][0]
+        self.assertFalse(row["ok"])
+        self.assertIn("frontier", row["detail"])
+        self.assertEqual(record["blocked_legs"], ["research"])
+
     def test_just_now_age_form_parses_and_passes(self) -> None:
         text = QMD_STATUS_FRESH.replace("updated 2h ago", "updated just now")
         ages = H.parse_collection_ages(text)
         self.assertEqual(set(ages), {"wisdom", "vault", "transcripts",
-                                     "conclusions"})
+                                     "conclusions", "frontier"})
         self.assertEqual(ages["wisdom"], 0.0)
         self.assertEqual(ages["transcripts"], 0.0)
         self.stub_qmd(text)
@@ -716,7 +751,7 @@ class CollectionsCoveredTest(LaunchCase):
 
     def test_full_reindex_passes(self) -> None:
         self.write_state({"last_reindex": {
-            "collections": ["vault", "transcripts", "conclusions", "wisdom"],
+            "collections": ["vault", "transcripts", "conclusions", "wisdom", "frontier"],
             "at": "2026-08-15T02:00:00"}})
         record = H.run([_row("collections-covered")])
         self.assertTrue(record["assertions"][0]["ok"])
@@ -1118,6 +1153,244 @@ class GoalHealthAssertionsTest(HealthCase):
         self.assertIn("numeric progress", record["assertions"][0]["detail"])
 
 
+class FrontierHealthTest(HealthCase):
+    """The knowledge-frontier assertions. Every one is proved BOTH ways: the clean
+    state passes, and a seeded defect of the realistic shape (the thing a bug or a hand edit
+    would leave behind, not a strawman) fires. All are degraded and block no leg."""
+
+    NAMES = ("frontier-released-integrity", "frontier-quadrant-consistent",
+             "frontier-uu-no-owner-evidence", "frontier-ceiling", "frontier-stuck-items")
+
+    def setUp(self) -> None:
+        super().setUp()
+        import frontier as F
+        import frontier_gaps as FG
+        self.F, self.FG = F, FG
+        for n in ("frontier", "goals"):
+            (self.tmp / n).mkdir(exist_ok=True)
+        dc.CFG["paths"].update({"frontier": str(self.tmp / "frontier"), "goals": str(self.tmp / "goals")})
+        self._frontier_cfg = dict(dc.CFG["frontier"])
+        self.addCleanup(lambda: (dc.CFG["frontier"].clear(), dc.CFG["frontier"].update(self._frontier_cfg)))
+        dc.CFG["frontier"].update({"weekly_ceiling": 3, "ceiling_window_days": 7, "max_parse_attempts": 3,
+                                   "cause_min_chars": 8})
+        self.write_goal("G0001", "active")
+
+    def write_goal(self, gid, status):
+        (self.tmp / "goals" / f"{gid}.md").write_text(
+            f"---\ntype: goal\nid: {gid}\nstatus: {status}\ntitle: Goal {gid}\ncreated: 2029-11-21\n"
+            f"plan_revision: 1\ntarget_date: 2027-06-30\nfinish_line: Done.\nwhy: Because.\n---\n\n# g\n\n"
+            f"## Plan (revision 1)\n\n- [ ] Step\n", encoding="utf-8")
+
+    def item(self, quadrant="unknown_unknown", evidence=(), goals=(), title=None):
+        n = len(list(self.F.items_dir().glob("K*.md"))) + 1 if self.F.items_dir().exists() else 1
+        it = self.F.Item(id=f"K{n:04d}", title=title or f"Concept {n}", quadrant=quadrant,
+                         origin="map" if evidence else "premortem")
+        for i, kind in enumerate(evidence):
+            it.add_evidence(kind, f"sources/transcripts/2026/10/t{i}", "2029-12-21", f"my own words number {i}")
+        for goal, relation in goals:
+            it.set_goal(goal, relation)
+        it.save()
+        return it
+
+    PASS = {"verdict": "pass", "model_verdict": "pass", "failed": [], "code_reasons": []}
+
+    def lesson(self, it, status="released", kind="new", released_at="2030-01-09T19:00:00+05:00",
+               check=None, cites="[1]", sources="[1] A source — https://example.com/a\n", **kw):
+        page = (f"## Lesson\n\nA title\n\nThe body {cites}.\n\n## Claims\n\n- C1 (fact): a claim [1]\n\n"
+                f"## Sources\n\n{sources}\n## Web sources (untrusted)\n\n## Egress record\n")
+        les = self.F.create_lesson(it, "G0001", kind, "a cause", 1, status=status, body=page,
+                                   check=self.PASS if check is None else check)
+        les.released_at = released_at
+        for k, v in kw.items():
+            setattr(les, k, v)
+        les.save()
+        return les
+
+    def run_assertion(self, name):
+        by = {n: fn for n, _, _, fn in H.ASSERTIONS}
+        ok, detail = by[name]()
+        return ok, detail
+
+    def assertClean(self, name):
+        ok, detail = self.run_assertion(name)
+        self.assertTrue(ok, detail)
+
+    def assertFires(self, name, *needles):
+        ok, detail = self.run_assertion(name)
+        self.assertFalse(ok, f"{name} passed on a seeded defect")
+        for needle in needles:
+            self.assertIn(needle, detail)
+
+    def test_registered_degraded_and_never_blocking(self):
+        got = {n: (sev, blocks) for n, sev, blocks, _ in H.ASSERTIONS}
+        for name in self.NAMES:
+            self.assertEqual(got.get(name), ("degraded", ()), name)
+
+    def test_an_empty_frontier_passes_every_assertion(self):
+        for name in self.NAMES:
+            self.assertClean(name)
+
+    def test_assertions_write_nothing(self):
+        it = self.item("known_known", ["explained"])
+        self.lesson(it)
+        before = {p: p.read_bytes() for p in self.tmp.rglob("*") if p.is_file()}
+        for name in self.NAMES:
+            self.run_assertion(name)
+        self.assertEqual({p: p.read_bytes() for p in self.tmp.rglob("*") if p.is_file()}, before)
+
+    # -- frontier-released-integrity ----------------------------------------
+    def test_integrity_passes_for_released_aired_and_tapped_lessons_that_passed(self):
+        for status in ("released", "aired", "got_it", "dig_deeper"):
+            self.lesson(self.item(), status=status)
+        self.assertClean("frontier-released-integrity")
+
+    def test_integrity_fires_on_a_released_lesson_whose_check_never_passed(self):
+        bad = self.lesson(self.item(), check={"verdict": "reject", "model_verdict": "reject"})
+        self.lesson(self.item())
+        self.assertFires("frontier-released-integrity", bad.id)
+
+    def test_integrity_fires_on_an_aired_lesson_citing_a_source_the_page_does_not_list(self):
+        bad = self.lesson(self.item(), status="aired", cites="[1] and [4]")
+        self.assertFires("frontier-released-integrity", bad.id)
+
+    def test_integrity_fires_on_a_tapped_lesson_with_no_sources(self):
+        bad = self.lesson(self.item(), status="got_it", sources="")
+        self.assertFires("frontier-released-integrity", bad.id)
+
+    def test_integrity_ignores_lessons_that_never_left(self):
+        self.lesson(self.item(), status="ready", check={"verdict": "reject"})
+        self.lesson(self.item(), status="rejected", check={"verdict": "reject"})
+        self.assertClean("frontier-released-integrity")
+
+    # -- frontier-quadrant-consistent ---------------------------------------
+    def test_quadrant_passes_when_each_item_sits_where_its_evidence_puts_it(self):
+        self.item("unknown_unknown", ["exposure"])
+        self.item("unknown_unknown")
+        self.item("known_unknown", ["asked"])
+        self.item("known_known", ["explained"], goals=[("G0001", "connected")])
+        self.item("unknown_known", ["decided"], goals=[("G0001", "unconnected")])
+        self.assertClean("frontier-quadrant-consistent")
+
+    def test_quadrant_passes_when_a_goal_was_paused_after_the_item_was_placed(self):
+        self.item("unknown_known", ["decided"], goals=[("G0002", "unconnected")])
+        self.write_goal("G0002", "paused")
+        self.assertClean("frontier-quadrant-consistent")
+
+    def test_quadrant_fires_on_owner_evidence_filed_as_unknown_unknown(self):
+        # the realistic defect: evidence appended and saved without apply_quadrant
+        bad = self.item("unknown_unknown", ["explained"])
+        self.item("known_known", ["explained"])
+        self.assertFires("frontier-quadrant-consistent", bad.id)
+
+    def test_quadrant_fires_on_known_known_with_an_unconnected_active_goal(self):
+        bad = self.item("known_known", ["applied"], goals=[("G0001", "unconnected")])
+        self.assertFires("frontier-quadrant-consistent", bad.id)
+
+    def test_quadrant_fires_when_an_aired_pin_was_not_honoured(self):
+        it = self.item("known_known", ["explained"])
+        self.lesson(it, status="aired", aired_on="2030-01-10", aired_quadrant="unknown_known")
+        self.assertFires("frontier-quadrant-consistent", it.id)
+
+    def test_quadrant_fires_when_a_got_it_tap_did_not_move_the_item(self):
+        it = self.item("unknown_known", ["decided"], goals=[("G0001", "unconnected")])
+        les = self.lesson(it, status="got_it", aired_on="2030-01-10", aired_quadrant="unknown_known")
+        les.taps = [{"id": "t1", "kind": "got_it", "at": "2030-01-11T08:00:00"}]
+        les.save()
+        self.assertFires("frontier-quadrant-consistent", it.id)
+
+    # -- frontier-uu-no-owner-evidence --------------------------------------
+    def test_uu_passes_with_no_evidence_or_only_assistant_exposure(self):
+        self.item("unknown_unknown")
+        self.item("unknown_unknown", ["exposure", "exposure"])
+        self.item("known_known", ["explained"])
+        self.assertClean("frontier-uu-no-owner-evidence")
+
+    def test_uu_fires_on_an_unknown_unknown_holding_the_owners_words(self):
+        for kind in ("explained", "asked"):
+            bad = self.item("unknown_unknown", ["exposure", kind])
+            self.assertFires("frontier-uu-no-owner-evidence", bad.id)
+            self.F.item_path(bad.id).unlink()
+
+    def test_uu_ignores_an_item_pinned_by_an_aired_lesson_that_later_gained_owner_evidence(self):
+        """The pin is the quadrant the owner was told it was in; the evidence came after."""
+        pinned = self.item("unknown_unknown", ["exposure", "explained"])
+        self.lesson(pinned, status="aired", aired_on="2030-01-10", aired_quadrant="unknown_unknown")
+        self.assertClean("frontier-uu-no-owner-evidence")
+        # one lesson that merely aired without a pin does not excuse it
+        loose = self.item("unknown_unknown", ["exposure", "explained"])
+        self.lesson(loose, status="released", aired_on="", aired_quadrant="")
+        self.assertFires("frontier-uu-no-owner-evidence", loose.id)
+
+    # -- frontier-ceiling ----------------------------------------------------
+    def at(self, day, hour=19):
+        # 2029-12-20 plus `day`, so day 1 is 2029-12-21
+        stamp = _dt.date(2029, 12, 20) + _dt.timedelta(days=day)
+        return f"{stamp.isoformat()}T{hour:02d}:00:00+05:00"
+
+    def test_ceiling_passes_at_the_ceiling_and_ignores_follow_ups_and_failed(self):
+        for d in (1, 2, 3):
+            self.lesson(self.item(), released_at=self.at(d))
+        self.lesson(self.item(), kind="follow_up", released_at=self.at(3, 20))
+        self.lesson(self.item(), status="failed", released_at=self.at(3, 21))
+        self.assertClean("frontier-ceiling")
+
+    def test_ceiling_passes_when_releases_slide_out_of_the_window(self):
+        for d in (1, 4, 7, 10, 13):        # three in any seven days at most
+            self.lesson(self.item(), released_at=self.at(d))
+        self.assertClean("frontier-ceiling")
+
+    def test_ceiling_fires_on_four_new_lessons_inside_the_window(self):
+        made = [self.lesson(self.item(), released_at=self.at(d)) for d in (1, 2, 4, 6)]
+        self.assertFires("frontier-ceiling", made[0].id)
+
+    def test_ceiling_fires_in_a_later_window_too(self):
+        for d in (1, 12, 13, 14, 15):
+            self.lesson(self.item(), released_at=self.at(d))
+        self.assertFires("frontier-ceiling")
+
+    def test_ceiling_counts_lessons_that_have_since_aired(self):
+        for d in (1, 2, 3):
+            self.lesson(self.item(), released_at=self.at(d), status="aired", aired_on="2029-12-25")
+        self.lesson(self.item(), released_at=self.at(4))
+        self.assertFires("frontier-ceiling")
+
+    # -- frontier-stuck-items ------------------------------------------------
+    def test_stuck_passes_for_work_still_inside_its_attempts(self):
+        dc.atomic_write_json(self.tmp / "meta" / dc.CFG["frontier"]["map_ledger_file"],
+                             {"version": 1, "done": {}, "skipped": {},
+                              "deferred": {"c1": {"reason": "parse", "attempts": 2}}})
+        dc.atomic_write_json(self.tmp / "meta" / dc.CFG["frontier"]["research_ledger_file"],
+                             {"version": 1, "done": {}, "skipped": {},
+                              "deferred": {"K7001": {"reason": "parse", "attempts": 2}}})
+        self.lesson(self.item(), parse_attempts=2)
+        self.FG.write_record("G0001", {"date": "2030-01-09", "plan_revision": 1, "causes": [],
+                                       "candidates": [{"title": "x", "summary": "y", "status": "deferred",
+                                                       "attempts": 2}]})
+        self.assertClean("frontier-stuck-items")
+
+    def test_stuck_fires_on_a_chat_the_map_gave_up_on(self):
+        dc.atomic_write_json(self.tmp / "meta" / dc.CFG["frontier"]["map_ledger_file"],
+                             {"version": 1, "done": {}, "deferred": {},
+                              "skipped": {"sources/transcripts/2026/10/t9": {"reason": "parse", "attempts": 3}}})
+        self.assertFires("frontier-stuck-items", "sources/transcripts/2026/10/t9")
+
+    def test_stuck_fires_on_a_lesson_key_the_researcher_gave_up_on(self):
+        dc.atomic_write_json(self.tmp / "meta" / dc.CFG["frontier"]["research_ledger_file"],
+                             {"version": 1, "done": {}, "deferred": {},
+                              "skipped": {"K7007": {"reason": "parse", "attempts": 3}}})
+        self.assertFires("frontier-stuck-items", "K7007")
+
+    def test_stuck_fires_on_a_lesson_at_the_attempt_limit(self):
+        les = self.lesson(self.item(), status="ready", parse_attempts=3)
+        self.assertFires("frontier-stuck-items", les.id)
+
+    def test_stuck_fires_on_a_premortem_candidate_that_ran_out_of_attempts(self):
+        self.FG.write_record("G0001", {"date": "2030-01-09", "plan_revision": 1, "causes": [],
+                                       "candidates": [{"title": "Stuck concept", "summary": "y",
+                                                       "status": "skipped", "attempts": 3}]})
+        self.assertFires("frontier-stuck-items", "G0001")
+
+
 class LaunchConfigTest(LaunchCase):
     def test_config_declares_the_launch_thresholds(self) -> None:
         health = dc.CFG.get("health") or {}
@@ -1126,7 +1399,7 @@ class LaunchConfigTest(LaunchCase):
                     "cost_window_days"):
             self.assertIn(key, health, f"config.yaml must carry health.{key}")
         self.assertEqual((dc.CFG.get("qmd") or {}).get("collections"),
-                         ["vault", "transcripts", "conclusions", "wisdom"])
+                         ["vault", "transcripts", "conclusions", "wisdom", "frontier"])
         thread = dc.CFG.get("thread") or {}
         for key in ("fold_max_attempts", "fold_queue_max",
                     "fold_queue_max_age_days"):

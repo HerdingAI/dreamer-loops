@@ -56,3 +56,6 @@ venv/
 .claude/settings.local.json
 # Generated per-run; carries loop titles once the vault is in use.
 vault/loops/_catalog.md
+# Finished lesson results waiting for wiki.lock (scripts/frontier_lessons.py). Only the
+# frontier run, under frontier.lock, touches them; a vault commit must never pick one up.
+vault/.vault-meta/frontier-pending/
