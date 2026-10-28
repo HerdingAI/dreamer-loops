@@ -45,6 +45,7 @@ class FakeShow:
         self.lesson_replies: list = []          # per POST /lessons: (code, body) or a callable(payload)
         self.known_code = 200
         self.withdraw_reply = None              # (code, body) for POST /lessons/<id>/withdraw
+        self.redirect_to = None                 # a URL: answer every request with a 302 there
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -72,12 +73,25 @@ class FakeShow:
                                        "token": self.headers.get("X-Dreamer-Token")})
                 return payload
 
+            def _redirected(self):
+                if not outer.redirect_to:
+                    return False
+                self.send_response(302)
+                self.send_header("Location", outer.redirect_to + self.path)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return True
+
             def do_GET(self):
                 self._record()
+                if self._redirected():
+                    return
                 self._reply(outer.status_code, outer.status)
 
             def do_POST(self):
                 payload = self._record()
+                if self._redirected():
+                    return
                 if self.path.endswith("/withdraw"):
                     code, body = outer.withdraw_reply or (200, {"state": "withdrawn", "id": self.path.split("/")[2],
                                                                 "was": "ready"})
@@ -201,6 +215,18 @@ class ConfigAndSecretsTest(SyncCase):
         self.assertTrue(self.fake.requests)
         self.assertTrue(all(r["token"] == TOKEN for r in self.fake.requests))
         self.assertNotIn(TOKEN, (self.tmp / "meta" / "frontier-sync.json").read_text())
+
+    def test_a_redirect_is_not_followed_so_the_token_stays_with_the_show(self):
+        # check_show_url vets only the configured URL; a 3xx to another host (or to
+        # plain http) must not carry the token there.
+        sink = FakeShow(self.tmp / "meta" / "sink.lock")
+        self.addCleanup(sink.close)
+        self.fake.redirect_to = sink.url
+        self.lesson()
+        self.assertEqual(S.pull()["status"], "show answered http 302")
+        S.push()
+        self.assertEqual(sink.requests, [])
+        self.assertTrue(self.fake.requests)
 
     def test_each_command_prints_one_json_object(self):
         out = io.StringIO()

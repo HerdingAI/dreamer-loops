@@ -243,9 +243,12 @@ import json, shlex, sys
 out, py, hook, results_hook = sys.argv[1:5]
 # PostToolUse records every URL a WebSearch returned: code fetches a URL the model
 # names only if a search actually returned it (no recorded URL, no fetch).
+# WebSearch is pre-approved, so a hook that cannot run (missing interpreter, crash
+# before it prints) must not count as "no opinion": any non-zero exit becomes 2,
+# the code that blocks the call.
 cfg = {"hooks": {
     "PreToolUse": [{"matcher": "*", "hooks": [
-        {"type": "command", "command": f"{shlex.quote(py)} {shlex.quote(hook)}"}]}],
+        {"type": "command", "command": f"{shlex.quote(py)} {shlex.quote(hook)} || exit 2"}]}],
     "PostToolUse": [{"matcher": "WebSearch", "hooks": [
         {"type": "command", "command": f"{shlex.quote(py)} {shlex.quote(results_hook)}"}]}]}}
 with open(out, "w") as fh:

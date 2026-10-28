@@ -151,6 +151,27 @@ class RunClaudeArgvTest(unittest.TestCase):
         cmd = pre[0]["hooks"][0]["command"]
         self.assertIn(str(ROOT / "scripts" / "egress_hook.py"), cmd)
 
+    def test_gated_hook_that_cannot_run_blocks_the_search(self):
+        """WebSearch is pre-approved, so a hook failure the CLI reads as non-blocking
+        (missing interpreter, crash before printing) would let the search through.
+        Any non-zero exit must become exit 2, the blocking code."""
+        (_, rec), _ = self.gated(DREAMER_EGRESS_LOG=str(self.tmp / "e.jsonl"))
+        argv = rec["argv"]
+        cfg = json.loads(Path(argv[argv.index("--settings") + 1]).read_text(encoding="utf-8"))
+        cmd = cfg["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        crashing = self.tmp / "crashing_hook.py"
+        crashing.write_text("raise SystemExit(1)\n")
+        hook = str(ROOT / "scripts" / "egress_hook.py")
+        py = cmd.split()[0]
+        for broken in (cmd.replace(hook, str(crashing)),                   # exits 1, prints nothing
+                       cmd.replace(py, str(self.tmp / "no-such-python"), 1)):  # exits 127
+            with self.subTest(broken=broken):
+                self.assertEqual(subprocess.run(["sh", "-c", broken], input="", text=True,
+                                                capture_output=True).returncode, 2)
+        ok = subprocess.run(["sh", "-c", cmd], input="", text=True, capture_output=True)
+        self.assertEqual(ok.returncode, 0)          # a working hook still answers in JSON
+        self.assertIn('"deny"', ok.stdout)          # (bad JSON on stdin is a deny)
+
     def test_gated_drops_user_settings_and_memory(self):
         """The research call must not carry the owner's global CLAUDE.md, auto-memory or
         user hooks/plugins into a context that reads untrusted search results."""

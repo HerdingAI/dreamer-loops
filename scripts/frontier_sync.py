@@ -155,6 +155,11 @@ def _wiki_lock():
 # HTTP
 # --------------------------------------------------------------------------
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None                     # the 3xx surfaces as an HTTPError with its code
+
+
 class Show:
     """The show's wire contract. `call` returns (http status, parsed JSON or None); status 0
     is a network failure. It never raises and never keeps or prints a response body."""
@@ -164,7 +169,9 @@ class Show:
         self._token = token
         self._base = str(_cfg("show_url")).rstrip("/")
         self._timeout = float(_cfg("show_timeout_seconds"))
-        self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        # No redirects: urllib copies X-Dreamer-Token onto the redirected request, and
+        # check_show_url vetted only the configured URL. A 3xx is reported as unusable.
+        self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
 
     def call(self, method: str, path: str, payload: dict | None = None) -> tuple[int, dict | None]:
         data = None if payload is None else json.dumps(payload).encode("utf-8")

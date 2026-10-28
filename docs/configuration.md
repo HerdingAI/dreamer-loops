@@ -1072,7 +1072,7 @@ account first.
 
 | Key | Meaning |
 |---|---|
-| `python`, `host_name` | The interpreter the host runs under (Chrome starts it with no shell environment) and the native-messaging host name |
+| `python`, `host_name` | The interpreter the host runs under (Chrome starts it with no shell environment) and the native-messaging host name. The extension connects to the name in `extension/dreamer-sync/background.js`, so the installer refuses any other value |
 | `due_hours` | A run is due when the last ok run is older than this |
 | `retry_after_failure_hours` | After a failed attempt, the hourly tick waits this long before retrying |
 | `quiet_hours` | Chats updated more recently than this are skipped, since they may be in progress; a later run takes them |
@@ -1171,7 +1171,7 @@ The HTTP contract the consumer implements is in
 
 | Key | Default | Meaning |
 |---|---|---|
-| `dictionary_path` | `/usr/share/dict/words` | Word list for the capitalised-token check. A missing file blocks every capitalised token (fail closed) |
+| `dictionary_path` | `/usr/share/dict/words` | Word list for the name checks (capitalised tokens, and lowercase words the list only knows capitalised). A missing or empty file blocks every query (fail closed); on Debian or Ubuntu it comes from the `wamerican` package |
 | `blocked_names_path` | `~/.config/dreamer/egress-blocked.txt` | Your names and third-party names, one per line, matched case-insensitively. A missing, unreadable or empty file blocks every query (fail closed), so create it before the first run |
 | `allowed_proper_nouns` | `[]` | Capitalised terms that name no person or private entity. Add a term only when it is a product, place or field name |
 | `phrase_run_words` | `4` | A run of this many words copied from the goal page or the item's evidence blocks the query |
