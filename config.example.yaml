@@ -526,7 +526,7 @@ solving:
 # up: its freshness axes read info/disabled.
 claude_ai_sync:
   python: /usr/bin/python3        # bin/claude-ai-host: Chrome starts the host with no shell environment
-  host_name: com.dreamer.claude_ai_sync
+  host_name: com.dreamer.claude_ai_sync  # must match HOST in extension/dreamer-sync/background.js
   extension_id: ""                # the ID Chrome shows for the unpacked extension on chrome://extensions
   due_hours: 20                   # a run is due when last_ok is older than this
   retry_after_failure_hours: 3    # after a failed attempt, wait this long before the hourly tick retries

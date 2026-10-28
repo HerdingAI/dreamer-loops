@@ -130,13 +130,18 @@ class Gate:
     def _load_dictionary(self, path: Path) -> bool:
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return False  # every capitalised token will be blocked
+        except OSError as exc:
+            # Queries are all-lowercase, so without the dictionary the lowercase-name
+            # check would pass everything: block every query rather than weaken silently.
+            self.load_errors.append(f"dictionary unreadable ({path}): {exc}")
+            return False
         for word in text.split():
             if word[:1].isupper():
                 self.dict_caps.add(word.casefold())
             else:
                 self.dict_lower.add(word.casefold())
+        if not self.dict_lower:
+            self.load_errors.append(f"dictionary has no words ({path})")
         return bool(self.dict_lower)
 
     # -- the check ----------------------------------------------------------

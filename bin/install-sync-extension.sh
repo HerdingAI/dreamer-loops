@@ -6,12 +6,25 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-read -r HOST_NAME EXT_ID < <(python3 - "$ROOT/config.yaml" <<'PY'
+# The extension connects to the host name compiled into background.js, so that
+# constant is the only name a manifest can usefully carry.
+EXT_HOST="$(sed -n 's/^const HOST = "\([^"]*\)";.*/\1/p' "$ROOT/extension/dreamer-sync/background.js")"
+[[ -n "$EXT_HOST" ]] || { echo "cannot read the host name from $ROOT/extension/dreamer-sync/background.js" >&2; exit 1; }
+read -r HOST_NAME EXT_ID < <(python3 - "$ROOT/config.yaml" "$EXT_HOST" <<'PY'
 import sys, yaml
 c = yaml.safe_load(open(sys.argv[1])).get("claude_ai_sync") or {}
-print(c.get("host_name") or "com.dreamer.claude_ai_sync", c.get("extension_id") or "")
+print(c.get("host_name") or sys.argv[2], c.get("extension_id") or "")
 PY
 )
+if [[ "$HOST_NAME" != "$EXT_HOST" ]]; then
+  cat >&2 <<MSG
+config.yaml claude_ai_sync.host_name is "$HOST_NAME", but the extension connects to
+"$EXT_HOST" (extension/dreamer-sync/background.js). A manifest under any other
+name is never reached. Nothing was written. Set claude_ai_sync.host_name to
+$EXT_HOST, or remove the key.
+MSG
+  exit 1
+fi
 if ! [[ "$EXT_ID" =~ ^[a-p]{32}$ ]]; then
   cat >&2 <<MSG
 config.yaml claude_ai_sync.extension_id is empty or not a valid extension id (32 letters a-p).

@@ -2,9 +2,8 @@
 # One-time setup for the freshness display.
 # Creates the database named by PGDATABASE on the Postgres server described in
 # ~/.config/dreamer/postgres.env (override: DREAMER_PG_ENV) if it does not
-# exist, publishes one snapshot
-# (which creates schema `health`, and schema `board` when the owner enabled
-# it), and reads it back.
+# exist, then publishes one snapshot and reads it back. Publishing creates
+# schema `health`, and schema `board` when the owner enabled it.
 #
 # This is the only step that creates anything outside schema `health`. Run it
 # yourself, once, after creating postgres.env.

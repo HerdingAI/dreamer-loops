@@ -77,7 +77,16 @@ def select_transcripts(limit: int | None = None) -> list[Path]:
     active = [g for g in G.load_goals() if g.status == "active"]
     if not active:
         return []
-    floor = min(g.created for g in active)
+    # A hand-edited goal can lose `created`; it cannot set the floor, and with no
+    # dated goal at all there is no floor, so read nothing rather than the archive.
+    dated_goals = [g.created for g in active if g.created]
+    undated = [g.id for g in active if not g.created]
+    if undated:
+        print(f"select_transcripts: active goal(s) without a created date: {', '.join(undated)}",
+              file=sys.stderr)
+    if not dated_goals:
+        return []
+    floor = min(dated_goals)
     if limit is None:
         limit = int((CFG.get("goals") or {}).get("assess_batch_size", 5))
     done = assessed_set()
