@@ -171,12 +171,19 @@ class QueryCheckTest(Base):
         self.blocked_path.write_text("# nothing\n\n", encoding="utf-8")
         self.assertFalse(self.gate().check("what is the best way").ok)
 
-    def test_missing_dictionary_blocks_every_capitalised_token(self):
+    def test_missing_dictionary_fails_closed(self):
+        # Queries are all-lowercase, so without the dictionary the lowercase-name check
+        # would silently pass "how does dana negotiate": block everything instead.
         self.dict_path.unlink()
         g = self.gate()
-        self.assertFalse(g.check("What is the best way").ok)
-        self.assertTrue(g.check("what is the best way").ok)
-        self.assertTrue(g.check("learn Python").ok)  # allow-listed still passes
+        for q in ("What is the best way", "what is the best way", "how does dana negotiate"):
+            r = g.check(q)
+            self.assertFalse(r.ok, q)
+            self.assertTrue(any("dictionary" in x for x in r.reasons), r.reasons)
+
+    def test_empty_dictionary_fails_closed(self):
+        self.dict_path.write_text("\n", encoding="utf-8")
+        self.assertFalse(self.gate().check("what is the best way").ok)
 
     def test_from_config_reads_paths(self):
         cfg = {"frontier": {"egress": {

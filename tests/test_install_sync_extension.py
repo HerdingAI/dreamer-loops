@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 INSTALLER = ROOT / "bin" / "install-sync-extension.sh"
 
 GOOD_ID = "a" * 16 + "p" * 16     # 32 chars from a-p: the shape Chrome assigns
-HOST_NAME = "com.example.sync_test"
+HOST_NAME = "com.dreamer.claude_ai_sync"
 
 
 class InstallerCase(unittest.TestCase):
@@ -34,6 +34,9 @@ class InstallerCase(unittest.TestCase):
         host = self.root / "bin" / "claude-ai-host"
         host.write_text("#!/bin/sh\nexit 0\n")
         host.chmod(0o755)
+        ext = self.root / "extension" / "dreamer-sync"
+        ext.mkdir(parents=True)
+        shutil.copy(INSTALLER.parent.parent / "extension" / "dreamer-sync" / "background.js", ext)
         self.home = self.tmp / "home"
         self.home.mkdir()
         self.nmh = self.home / ".config" / "google-chrome" / "NativeMessagingHosts"
@@ -41,10 +44,10 @@ class InstallerCase(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def config(self, ext_id_line: str) -> None:
+    def config(self, ext_id_line: str, host_name: str = HOST_NAME) -> None:
         (self.root / "config.yaml").write_text(
             "claude_ai_sync:\n"
-            f"  host_name: {HOST_NAME}\n"
+            f"  host_name: {host_name}\n"
             f"{ext_id_line}\n", encoding="utf-8")
 
     def run_installer(self) -> subprocess.CompletedProcess:
@@ -83,6 +86,16 @@ class RejectedIdTest(InstallerCase):
         self.config('  extension_id: ""')
         r = self.run_installer()
         self.assertIn("chrome://extensions", r.stderr)
+
+    def test_a_host_name_the_extension_does_not_use_is_rejected(self) -> None:
+        # The extension connects to the name compiled into background.js; a manifest
+        # under any other name would install cleanly and never be reached.
+        self.config(f"  extension_id: {GOOD_ID}", host_name="com.example.other_host")
+        r = self.run_installer()
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("claude_ai_sync.host_name", r.stderr)
+        self.assertIn(HOST_NAME, r.stderr)
+        self.assertEqual(self.written(), [])
 
 
 class WrittenManifestTest(InstallerCase):

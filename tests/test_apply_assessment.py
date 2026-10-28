@@ -8,6 +8,8 @@ import json
 import shutil
 import sys
 import tempfile
+import io
+import contextlib
 import unittest
 from pathlib import Path
 
@@ -409,6 +411,30 @@ class TranscriptSelectionTest(ApplyAssessmentCase):
         self.assertEqual(rels(AA.select_transcripts()), [c])
         AA.mark_assessed([AA.rel_of(f) for f in AA.select_transcripts()])
         self.assertEqual(AA.select_transcripts(), [])
+
+    def _drop_created(self, goal) -> None:
+        text = goal.path.read_text(encoding="utf-8")
+        goal.path.write_text("\n".join(l for l in text.splitlines() if not l.startswith("created:")) + "\n",
+                             encoding="utf-8")
+
+    def test_a_goal_with_no_created_date_does_not_crash_or_drop_the_floor(self) -> None:
+        dated = G.commit_goal("Chess", "F", None, "W", ["S"], "quote", "s", ref=D("2026-09-03"))
+        undated = G.commit_goal("Glaze", "F", None, "W", ["S"], "quote", "s", ref=D("2026-09-01"))
+        self._drop_created(undated)
+        before = self.transcript("2026-09-02", "before")
+        a = self.transcript("2026-09-04", "a")
+        rels = [f"[[{AA.rel_of(f)}]]" for f in AA.select_transcripts()]
+        self.assertEqual(rels, [a])
+        self.assertNotIn(before, rels)
+        self.assertTrue(dated.created)
+
+    def test_only_undated_active_goals_select_nothing(self) -> None:
+        self._drop_created(G.commit_goal("Glaze", "F", None, "W", ["S"], "quote", "s", ref=D("2026-09-01")))
+        self.transcript("2026-09-04", "a")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(AA.select_transcripts(), [])
+        self.assertIn("created", err.getvalue())
 
 
 class SchedulingTest(unittest.TestCase):
