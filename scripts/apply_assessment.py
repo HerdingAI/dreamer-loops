@@ -71,7 +71,7 @@ def transcript_date(path: Path) -> _dt.date | None:
 
 def select_transcripts(limit: int | None = None) -> list[Path]:
     """The next unassessed transcripts, oldest first, capped at
-    goals.assess_batch_size. Nothing dated before the oldest active goal was
+    goals.assess_batch_size (null: no cap, the whole backlog in one run). Nothing dated before the oldest active goal was
     committed is eligible: it cannot be progress on a goal that did not exist,
     and without the floor the first goal would drag in the whole archive."""
     active = [g for g in G.load_goals() if g.status == "active"]
@@ -88,7 +88,8 @@ def select_transcripts(limit: int | None = None) -> list[Path]:
         return []
     floor = min(dated_goals)
     if limit is None:
-        limit = int((CFG.get("goals") or {}).get("assess_batch_size", 5))
+        size = (CFG.get("goals") or {}).get("assess_batch_size")
+        limit = sys.maxsize if size is None else int(size)
     done = assessed_set()
     dated = []
     for f in p("sources").rglob("*.md"):

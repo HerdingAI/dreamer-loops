@@ -412,6 +412,13 @@ class TranscriptSelectionTest(ApplyAssessmentCase):
         AA.mark_assessed([AA.rel_of(f) for f in AA.select_transcripts()])
         self.assertEqual(AA.select_transcripts(), [])
 
+    def test_a_null_batch_size_selects_every_unassessed_transcript(self) -> None:
+        dc.CFG["goals"]["assess_batch_size"] = None
+        G.commit_goal("LSAT", "F", None, "W", ["S"], "quote", "s", ref=D("2026-09-03"))
+        made = [self.transcript(f"2026-09-0{d}", f"t{d}") for d in range(3, 10)]
+        rels = lambda files: [f"[[{AA.rel_of(f)}]]" for f in files]  # noqa: E731
+        self.assertEqual(rels(AA.select_transcripts()), made)
+
     def _drop_created(self, goal) -> None:
         text = goal.path.read_text(encoding="utf-8")
         goal.path.write_text("\n".join(l for l in text.splitlines() if not l.startswith("created:")) + "\n",

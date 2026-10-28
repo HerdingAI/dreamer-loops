@@ -586,8 +586,8 @@ Three pieces make the writes trustworthy:
 not extraction succeeded. With no active goal it is a clean no-op with no model
 call. Otherwise it follows the same extract/apply split as everything else:
 
-1. `apply_assessment.py select` picks the next `goals.assess_batch_size`
-   unassessed transcripts, oldest first, from the ledger
+1. `apply_assessment.py select` picks every unassessed transcript (or the next
+   `goals.assess_batch_size` when that is set), oldest first, from the ledger
    `vault/.vault-meta/assessed.json`.
 2. One research-surface model call (`budget.max_turns_assess`) proposes
    attachments: a transcript, a goal and an anchor quote.

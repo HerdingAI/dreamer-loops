@@ -100,9 +100,10 @@ goals:
   max_open_questions:        2    # back-pressure on the open-questions queue
   back_off_days:             14   # a deferred question is not re-asked before this
   silence_escalation_weeks:  3    # silence escalates after this many weeks
-  # Transcripts the assessor reads per run, oldest unassessed first. The rest
-  # drain on later nights; a normal night ingests fewer than this.
-  assess_batch_size:         5
+  # Transcripts the assessor reads per run, oldest unassessed first. null = no
+  # cap: every unassessed transcript goes into one run, inlined in one prompt.
+  # Set a number after a large backfill so the prompt stays inside the context.
+  assess_batch_size:         null
 
 # --- tagging --------------------------------------------------------------
 tagging:

@@ -507,7 +507,7 @@ goals:
   max_open_questions:        2
   back_off_days:             14
   silence_escalation_weeks:  3
-  assess_batch_size:         5
+  assess_batch_size:         null
 ```
 
 Governs the goal assessor (`bin/nightly-assess.sh`, see
@@ -531,9 +531,10 @@ authored by you; these keys decide how patient Dreamer is about them.
   kept: questions beyond it wait, and nothing ages out. `back_off_days` is how
   long a question you deferred is left alone, and `silence_escalation_weeks` is
   how long silence continues before its question escalates.
-- `assess_batch_size` is the number of transcripts the assessor reads per run,
-  oldest unassessed first. The rest drain on later nights. Raise it only after
-  a large backfill, since each run is one model call.
+- `assess_batch_size` caps the transcripts the assessor reads per run, oldest
+  unassessed first; the rest drain on later nights. `null` (the default) means
+  no cap: the whole backlog goes into one run. Every selected transcript is
+  inlined in one model call, so set a number before a large backfill.
 
 The owner-write keys that go with this feature live under [`mcp`](#mcp).
 
